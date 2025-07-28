@@ -1,0 +1,110 @@
+
+body {
+    margin: 0;
+    padding: 0;
+    font-family: "Orbitron", sans-serif;
+    background: radial-gradient(circle at center, #000, #0d0d0d 60%, #111 100%);
+    color: #00ffcc;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    overflow: hidden;
+  }
+  
+  /* Navbar Styling */
+  .navbar {
+    width: 100%;
+    background-color: #111;
+    padding: 10px 0;
+    text-align: center;
+    box-shadow: 0 4px 8px rgba(0, 255, 204, 0.1);
+    position: absolute;
+    top: 0;
+    left: 0;
+  }
+  
+  .navbar ul {
+    list-style-type: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    justify-content: center;
+  }
+  
+  .navbar ul li {
+    margin: 0 15px;
+  }
+  
+  .navbar ul li a {
+    text-decoration: none;
+    color: #00ffcc;
+    font-size: 18px;
+    transition: color 0.3s ease;
+  }
+  
+  .navbar ul li a:hover {
+    color: #fff;
+  }
+  
+  /* Combat Selection Section */
+  .combat-selection {
+    text-align: center;
+  }
+  
+  .combat-selection h2 {
+    font-size: 66px;
+    text-transform: uppercase;
+    letter-spacing: 3px;
+    margin-bottom: 40px; /* Reduced margin-bottom */
+    text-shadow: 0 0 8px #00ffff, 0 0 8px #00ffff;
+    animation: pulse 2s infinite;
+  }
+  
+  .combat-grid {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 20px;
+    margin-bottom: 40px; /* Reduced margin-bottom */
+  }
+  
+  /* Combat Cards */
+  .combat-card {
+    background: linear-gradient(45deg, #001a33, #003366);
+    border: 2px solid #00ffff;
+    color: #00ffff;
+    padding: 15px 30px;
+    font-size: 18px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    width: 100%;
+    max-width: 300px;
+    position: relative;
+    overflow: hidden;
+  }
+  
+  .combat-card:hover {
+    transform: translateY(-5px) scale(1.05);
+    box-shadow: 0 0 25px rgba(0, 255, 204, 0.7);
+  }
+  
+  .combat-card:active {
+    transform: translateY(0) scale(1);
+    box-shadow: 0 0 10px rgba(0, 255, 204, 0.3);
+  }
+  
+  /* Animations */
+  @keyframes pulse {
+    0%,
+    100% {
+      text-shadow: 0 0 10px #00ffff, 0 0 20px #00ffff;
+    }
+    50% {
+      text-shadow: 0 0 20px #00ffff, 0 0 30px #00ffff, 0 0 40px #00ffff;
+    }
+  }
+  

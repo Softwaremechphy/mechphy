@@ -1,0 +1,226 @@
+import aioserial
+import asyncio
+import re
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
+class GPSData:
+    def __init__(self, latitude, longitude):
+        self.latitude = latitude
+        self.longitude = longitude
+
+class IMUData:
+    def __init__(self, roll, pitch, yaw):
+        self.roll = roll
+        self.pitch = pitch
+        self.yaw = yaw
+
+class HitData:
+    def __init__(self, hit_status):
+        self.hit_status = hit_status
+
+class AmmoData:
+    def __init__(self, attacker_id, fire_mode, weapon_id):
+        self.attacker_id = attacker_id
+        self.fire_mode = fire_mode
+        self.weapon_id = weapon_id
+
+class SoldierData:
+    def __init__(self, soldier_id, gps_data, imu_data, hit_data, ammo_data, weapon_id, fire_mode, trigger_event, bullet_count):
+        self.soldier_id = soldier_id
+        self.gps_data = gps_data
+        self.imu_data = imu_data
+        self.hit_data = hit_data
+        self.ammo_data = ammo_data
+        self.weapon_id = weapon_id
+        self.fire_mode = fire_mode
+        self.trigger_event = trigger_event
+        self.bullet_count = bullet_count
+    
+    def to_dict(self):
+        """Convert SoldierData to a dictionary compatible with Faust's Soldier record."""
+        return {
+            "soldier_id": self.soldier_id,
+            "gps_data": {"latitude": self.gps_data.latitude, "longitude": self.gps_data.longitude},
+            "imu_data": {"roll": self.imu_data.roll, "pitch": self.imu_data.pitch, "yaw": self.imu_data.yaw},
+            "hit_data": {"hit_status": self.hit_data.hit_status},
+            "ammo_data": {
+                "attacker_id": self.ammo_data.attacker_id,
+                "fire_mode": self.ammo_data.fire_mode,
+                "weapon_id": self.ammo_data.weapon_id
+            },
+            "weapon_id": self.weapon_id,
+            "fire_mode": self.fire_mode,
+            "trigger_event": self.trigger_event,
+            "bullet_count": self.bullet_count
+        }
+    
+    def __repr__(self):
+        return (f"SoldierData(soldier_id={self.soldier_id}, "
+                f"latitude={self.gps_data.latitude:.6f}, "
+                f"longitude={self.gps_data.longitude:.6f}, "
+                f"roll={self.imu_data.roll}, "
+                f"pitch={self.imu_data.pitch}, "
+                f"yaw={self.imu_data.yaw}, "
+                f"hit_status={self.hit_data.hit_status}, "
+                f"attacker_id={self.ammo_data.attacker_id}, "
+                f"fire_mode={self.fire_mode}, "
+                f"weapon_id={self.weapon_id}, "
+                f"trigger_event={self.trigger_event}, "
+                f"bullet_count={self.bullet_count})")
+
+def parse_gps_coordinate(coord_str):
+    """Parse GPS coordinate from DDMM.MMMMM format to decimal degrees."""
+    try:
+        coord_float = float(coord_str)
+        
+        # Convert from DDMM.MMMMM to decimal degrees
+        degrees = int(coord_float / 100)  # Get DD part
+        minutes = coord_float - (degrees * 100)  # Get MM.MMMMM part
+        decimal_degrees = degrees + (minutes / 60)
+        
+        return decimal_degrees
+    except (ValueError, TypeError):
+        logger.warning(f"Could not parse GPS coordinate: {coord_str}")
+        return 0.0
+
+async def parse_raw_data(raw_data: str) -> SoldierData:
+    """Parse a single message from the new data format."""
+    try:
+        logger.debug(f"Parsing raw data: {raw_data}")
+        
+        # Split by commas
+        data = raw_data.split(',')
+        logger.debug(f"Split data: {data}")
+        
+        # Remove empty strings and whitespace
+        data = [item.strip() for item in data if item.strip()]
+        
+        if len(data) != 12:
+            logger.warning(f"Invalid data length: {len(data)} fields in {raw_data}")
+            return None
+
+        # Parse based on the actual format from your data
+        # Format: soldier_id,lat,lon,roll,pitch,yaw,hit_status,attacker_id,fire_mode,weapon_id,trigger_event,bullet_count
+        
+        soldier_id = data[0]
+        
+        # Parse GPS coordinates (positions 1 and 2)
+        latitude = parse_gps_coordinate(data[1])   # 2831.50831
+        longitude = parse_gps_coordinate(data[2])  # 07716.94457
+        
+        # Parse IMU data (positions 3, 4, 5)
+        roll = float(data[3])     # 0.00
+        pitch = float(data[4])    # 0.00
+        yaw = float(data[5])      # 0.00
+        
+        # Parse remaining fields
+        hit_status = int(data[6])     # 0
+        attacker_id = data[7]         # 8 (kept as string)
+        fire_mode = int(data[8])      # 2
+        weapon_id = int(data[9])      # 3
+        trigger_event = int(data[10]) # 7
+        bullet_count = int(data[11])  # 1
+
+        # Create SoldierData object
+        soldier_data = SoldierData(
+            soldier_id=soldier_id,
+            gps_data=GPSData(latitude=latitude, longitude=longitude),
+            imu_data=IMUData(roll=roll, pitch=pitch, yaw=yaw),
+            hit_data=HitData(hit_status=hit_status),
+            ammo_data=AmmoData(attacker_id=attacker_id, fire_mode=fire_mode, weapon_id=weapon_id),
+            weapon_id=weapon_id,
+            fire_mode=fire_mode,
+            trigger_event=trigger_event,
+            bullet_count=bullet_count
+        )
+        
+        logger.info(f"Successfully parsed: {soldier_data}")
+        return soldier_data
+
+    except Exception as e:
+        logger.error(f"Error parsing data: {raw_data}, Error: {e}")
+        return None
+
+async def receive_serial_data():
+    """Asynchronously read and process serial data using aioserial."""
+    while True:
+        ser = None
+        try:
+            ser = aioserial.AioSerial(port='/dev/ttyUSB0', baudrate=9600, timeout=1)
+            logger.info(f"Connected to {ser.port} at {ser.baudrate} baud")
+            buffer = ""
+            
+            while True:
+                # Read up to 1024 bytes asynchronously
+                data = await ser.read_async(1024)
+                if data:
+                    # Decode with error handling for noisy data
+                    raw_data = data.decode('utf-8', errors='ignore').strip()
+                    logger.debug(f"Raw data received: {repr(raw_data)}")
+                    
+                    # Add to buffer and normalize line endings
+                    buffer += raw_data.replace('\r\n', '\n').replace('\r', '\n')
+                    
+                    # Extract all complete messages within {}
+                    # Use a more robust regex to handle the new format
+                    messages = re.findall(r'\{([^{}]*)\}', buffer)
+                    
+                    for msg in messages:
+                        logger.debug(f"Extracted message: {msg}")
+                        soldier_data = await parse_raw_data(msg)
+                        if soldier_data:
+                            logger.info(f"Yielding parsed data: {soldier_data}")
+                            yield soldier_data.to_dict()  # Yield dictionary for Faust
+                    
+                    # Remove processed messages from buffer
+                    last_brace = buffer.rfind('}')
+                    if last_brace != -1:
+                        buffer = buffer[last_brace + 1:]
+                    
+                    # Prevent buffer from growing too large with protocol noise
+                    if len(buffer) > 4096:  # Increased buffer size for noisy data
+                        logger.warning("Buffer too large, clearing to prevent memory issues")
+                        buffer = buffer[-1024:]  # Keep more data due to noise
+                        
+                else:
+                    logger.debug("No data received in this iteration")
+                    await asyncio.sleep(0.1)  # Prevent tight loop
+                
+        except Exception as e:
+            logger.error(f"Serial communication error: {e}")
+            await asyncio.sleep(5)  # Wait before retrying
+        finally:
+            if ser and ser.is_open:
+                logger.info("Closing serial connection")
+                ser.close()
+
+# Test function to validate parsing with your actual sample data
+async def test_parsing():
+    """Test the parsing function with actual sample data."""
+    test_data = [
+        "6,2831.50831,07716.94457,0.00,0.00,0.00,0,8,2,3,7,1",
+        "6,2831.50826,07716.94458,0.00,0.00,0.00,0,8,2,3,7,1",
+        "2,2831.50895,07716.94479,0.00,0.00,0.00,0,8,2,3,7,1",
+        "1,2831.50823,07716.94658,0.00,0.00,0.00,0,8,2,3,7,1"
+    ]
+    
+    for i, data in enumerate(test_data):
+        print(f"\nTest {i+1}: {data}")
+        result = await parse_raw_data(data)
+        if result:
+            print(f"Test successful: {result}")
+            print(f"Latitude: {result.gps_data.latitude:.6f}")
+            print(f"Longitude: {result.gps_data.longitude:.6f}")
+        else:
+            print("Test failed")
+
+if __name__ == "__main__":
+    # Uncomment the line below to test parsing
+    # asyncio.run(test_parsing())
+    
+    # Run the main serial receiver
+    asyncio.run(receive_serial_data())

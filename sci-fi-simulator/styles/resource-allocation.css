@@ -1,0 +1,165 @@
+/* resource-allocation.css */
+.container {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+body {
+  background-color: #0a0a0a;
+  color: #fff;
+  font-family: 'Arial', sans-serif;
+  min-height: 100vh;
+  box-sizing: border-box;
+}
+.error {
+  color: red;
+  margin-bottom: 10px;
+}
+.loading {
+  color: blue;
+  margin-bottom: 10px;
+}
+h1 {
+  color: #00ffff;
+  text-align: center;
+  margin-bottom: 30px;
+}
+
+.team {
+  background-color: #1a1a1a;
+  border: 1px solid #00ffff;
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.progress-bar {
+  background-color: #333;
+  height: 8px;
+  border-radius: 4px;
+  margin: 15px 0;
+}
+
+.progress {
+  background-color: #00ffff;
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.4s ease;
+}
+
+.soldier {
+  background-color: #2a2a2a;
+  border: 1px solid #00ffff;
+  border-radius: 5px;
+  padding: 15px;
+  margin-bottom: 15px;
+}
+
+.select-row {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.soldier-details {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+select, input {
+  width: 100%;
+  padding: 8px;
+  background-color: #333;
+  color: #fff;
+  border: 1px solid #00ffff;
+  border-radius: 4px;
+}
+
+select:focus, input:focus {
+  outline: none;
+  border-color: #00ffff;
+  box-shadow: 0 0 0 1px #00ffff;
+}
+
+button {
+  background-color: #008080;
+  color: #fff;
+  border: none;
+  padding: 8px 15px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+button:hover {
+  background-color: #006666;
+}
+
+button:disabled {
+  background-color: #555;
+  cursor: not-allowed;
+}
+
+.save-button {
+  display: block;
+  margin: 20px auto;
+  padding: 10px 20px;
+  font-size: 16px;
+  background-color: #008080;
+  min-width: 150px;
+}
+
+/* Preview table styles */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 20px;
+  background-color: #1a1a1a;
+  border: 1px solid #00ffff;
+}
+
+th, td {
+  padding: 12px;
+  text-align: left;
+  border: 1px solid #00ffff;
+}
+
+th {
+  background-color: #008080;
+  color: #fff;
+}
+
+tr:nth-child(even) {
+  background-color: #2a2a2a;
+}
+
+#preview {
+  background-color: #1a1a1a;
+  border: 1px solid #00ffff;
+  border-radius: 10px;
+  padding: 20px;
+  margin-top: 20px;
+}
+
+#preview h2 {
+  color: #00ffff;
+  margin-top: 0;
+}
+
+#preview button {
+  margin: 10px;
+}
+
+@media (max-width: 600px) {
+  .soldier-details {
+    flex-direction: column;
+    gap: 8px;
+  }
+  
+  .select-row {
+    flex-direction: column;
+    gap: 8px;
+  }
+}

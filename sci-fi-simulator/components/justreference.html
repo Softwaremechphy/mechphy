@@ -1,0 +1,10 @@
+{stats.team_red.bullets_fired || 0}
+  {stats.team_red.total_killed || 0}
+
+{stats.team_blue.total_killed || 0}
+{stats.team_blue.bullets_fired || 0}
+
+wscat -c ws://172.20.10.4:8001/ws
+wscat -c ws://172.20.10.4:8003/ws 
+wscat -c ws://172.20.10.4:8002/ws
+   

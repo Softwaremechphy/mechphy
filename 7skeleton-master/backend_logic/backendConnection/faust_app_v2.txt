@@ -1,0 +1,488 @@
+# backend_logic/backendConnection/faust_app_v1.py
+
+import faust
+import json
+import asyncio
+import websockets
+from mode import Service
+from websockets.exceptions import ConnectionClosed
+from db.schemas.incoming_soldier import Soldier
+from db.data_transformer import transform_soldier_data
+from db.mongodb_handler import (
+    store_to_mongo,
+    get_soldier_data_from_db,
+    get_soldier_data_from_latest_session,
+    update_soldier_damage,
+    get_db_in,
+)
+from configs.config import settings
+from configs.logging_config import faust_logger as logger
+from datetime import datetime
+from fastapi import FastAPI
+from motor.motor_asyncio import AsyncIOMotorClient
+import utils
+
+# FastAPI app and MongoDB client initialization
+app = FastAPI()
+client = AsyncIOMotorClient(settings.MONGODB_URI)
+db_in = client[settings.DB_in]
+
+# Robust WebSocket service class
+class WebSocketService(Service):
+    def __init__(self, app, port: int, name: str):
+        self.app = app
+        self.port = port
+        self.name = name
+        self.host = settings.WS_HOST
+        self.connections = set()  # Changed from list to set
+        self.server = None
+        super().__init__()
+        logger.info(f"Initialized {name} WebSocket service on port {port}")
+
+    async def on_started(self) -> None:
+        """Start the WebSocket server when service starts"""
+        try:
+            self.server = await websockets.serve(
+                self.handle_connection,
+                self.host,
+                self.port
+            )
+            logger.info(f"Started {self.name} WebSocket server on {self.host}:{self.port}")
+        except Exception as e:
+            logger.error(f"Failed to start {self.name} WebSocket server: {str(e)}")
+            raise
+
+    async def on_stop(self) -> None:
+        """Clean shutdown of WebSocket server and connections"""
+        try:
+            if hasattr(self, 'server') and self.server:
+                self.server.close()
+                await self.server.wait_closed()
+            
+            # Close all active connections
+            close_tasks = [ws.close() for ws in self.connections]
+            if close_tasks:
+                await asyncio.gather(*close_tasks, return_exceptions=True)
+            
+            self.connections.clear()
+            logger.info(f"Stopped {self.name} WebSocket server")
+        except Exception as e:
+            logger.error(f"Error stopping {self.name} WebSocket server: {str(e)}")
+
+    async def handle_connection(self, websocket, path):
+        """Handle individual WebSocket connections"""
+        try:
+            if path != '/ws':
+                logger.warning(f"Unexpected connection path: {path}")
+                await websocket.close(code=1003, reason="Invalid path")
+                return
+
+            self.connections.add(websocket)
+            logger.info(f"New connection to {self.name} WebSocket from {websocket.remote_address}")
+            
+            try:
+                # Send connection confirmation
+                await websocket.send(json.dumps({
+                    "type": "connection",
+                    "status": "connected",
+                    "service": self.name
+                }))
+                
+                # Listen for incoming messages
+                async for message in websocket:
+                    logger.debug(f"Received message on {self.name} WebSocket: {message}")
+                    # Echo back the message (keeping original behavior)
+                    await websocket.send(f"Received: {message}")
+                    
+            except websockets.exceptions.ConnectionClosed:
+                logger.info(f"Connection closed for {self.name} WebSocket")
+            finally:
+                self.connections.discard(websocket)  # Use discard instead of remove
+                
+        except Exception as e:
+            logger.error(f"Error in {self.name} WebSocket connection handler: {str(e)}")
+
+    async def broadcast(self, message: dict):
+        """Robust broadcast method that handles dead connections"""
+        if not self.connections:
+            logger.debug(f"No active connections for {self.name} WebSocket")
+            return
+
+        disconnected = set()
+        
+        try:
+            message_str = json.dumps(message) if isinstance(message, dict) else str(message)
+            broadcast_tasks = []
+            
+            for websocket in self.connections.copy():  # Use copy to avoid modification during iteration
+                try:
+                    task = asyncio.create_task(websocket.send(message_str))
+                    broadcast_tasks.append(task)
+                except websockets.exceptions.ConnectionClosed:
+                    disconnected.add(websocket)
+                except Exception as e:
+                    logger.error(f"Error preparing broadcast to {self.name} WebSocket: {str(e)}")
+                    disconnected.add(websocket)
+            
+            if broadcast_tasks:
+                results = await asyncio.gather(*broadcast_tasks, return_exceptions=True)
+                
+                # Check for failed sends and mark connections as disconnected
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        websocket = list(self.connections)[i] if i < len(self.connections) else None
+                        if websocket:
+                            disconnected.add(websocket)
+            
+            # Remove disconnected connections
+            self.connections.difference_update(disconnected)
+            
+            logger.debug(f"Broadcasted message to {len(self.connections)} {self.name} WebSocket connections")
+            
+        except Exception as e:
+            logger.error(f"Unexpected error in {self.name} WebSocket broadcast: {str(e)}")
+
+
+# Custom Faust App with WebSocket services and bullet counts
+class App(faust.App):
+    def on_init(self):
+        """Initialize WebSocket services and bullet counts"""
+        # Create robust WebSocket services
+        self.ws_service_raw = WebSocketService(self, port=8001, name="raw_data")
+        self.ws_service_kill_feed = WebSocketService(self, port=8002, name="kill_feed")
+        self.ws_service_team_stats = WebSocketService(self, port=8003, name="team_stats")
+        
+        # Persistent bullet counts
+        self.bullet_counts = {"team_red": 0, "team_blue": 0}
+
+    async def on_start(self):
+        """Add WebSocket services as runtime dependencies"""
+        await self.add_runtime_dependency(self.ws_service_raw)
+        await self.add_runtime_dependency(self.ws_service_kill_feed)
+        await self.add_runtime_dependency(self.ws_service_team_stats)
+
+
+# Define the Faust app (overrides FastAPI app above)
+app = App(
+    'soldiers-data',
+    broker=settings.KAFKA_BROKER,
+    store='memory://',
+    value_serializer='json',
+)
+
+# Kafka topic to process incoming soldier data
+soldier_topic = app.topic(settings.KAFKA_TOPIC, value_type=Soldier, partitions=1)
+
+# Calculate and broadcast team statistics to WebSocket clients and store in DB
+async def calculate_and_broadcast_team_stats(session_id):
+    try:
+        # Fetch the latest session by session_id
+        latest_session = await db_in["sessions"].find_one({"_id": session_id})
+        if not latest_session:
+            logger.error("No session found for team stats calculation")
+            return
+
+        # Initialize team stats with current bullet counts
+        team_stats = {
+            "team_red": {"total_killed": 0, "bullets_fired": app.bullet_counts["team_red"]},
+            "team_blue": {"total_killed": 0, "bullets_fired": app.bullet_counts["team_blue"]}
+        }
+
+        # Calculate kills for each team from soldier stats
+        for soldier in latest_session["participated_soldiers"]:
+            team = soldier.get("team", "").lower()
+            if team not in ["red", "blue"]:
+                continue
+
+            soldier_stats = soldier.get("stats", [])
+            if soldier_stats:
+                latest_stat = soldier_stats[-1]
+                team_stats[f"team_{team}"]["total_killed"] += latest_stat.get("kill_count", 0)
+
+        current_time = datetime.utcnow()
+
+        # Create team stats event object for DB
+        team_stats_event = {
+            "team_red": {
+                "total_killed": team_stats["team_red"]["total_killed"],
+                "bullets_fired": team_stats["team_red"]["bullets_fired"],
+                "timestamp": current_time
+            },
+            "team_blue": {
+                "total_killed": team_stats["team_blue"]["total_killed"],
+                "bullets_fired": team_stats["team_blue"]["bullets_fired"],
+                "timestamp": current_time
+            }
+        }
+
+        # Store team stats in session history in DB
+        update_result = await db_in["sessions"].update_one(
+            {"_id": session_id},
+            {
+                "$push": {
+                    "team_stats_history": team_stats_event
+                }
+            }
+        )
+
+        if update_result.modified_count != 1:
+            logger.error("Failed to store team stats in session history")
+
+        # Prepare WebSocket message (convert timestamp to ISO string)
+        websocket_message = {
+            "team_red": {
+                "total_killed": team_stats["team_red"]["total_killed"],
+                "bullets_fired": team_stats["team_red"]["bullets_fired"],
+                "timestamp": current_time.isoformat()
+            },
+            "team_blue": {
+                "total_killed": team_stats["team_blue"]["total_killed"],
+                "bullets_fired": team_stats["team_blue"]["bullets_fired"],
+                "timestamp": current_time.isoformat()
+            }
+        }
+
+        # Broadcast team stats using robust broadcast method
+        await app.ws_service_team_stats.broadcast(websocket_message)
+
+        logger.info(f"Team stats updated and broadcasted for session {session_id}")
+
+    except Exception as e:
+        logger.error(f"Error calculating team stats: {e}", exc_info=True)
+
+
+# Faust agent to process incoming soldier data from Kafka
+@app.agent(soldier_topic)
+async def process_soldiers(soldier_data_stream):
+    # Start periodic stats update in the background
+    asyncio.create_task(periodic_stats_update())
+    
+    async for soldier_data in soldier_data_stream:
+        try:
+            # Log received soldier data
+            logger.info(f"Received soldier data in Faust: {soldier_data}")
+            
+            # Transform and timestamp the incoming soldier data
+            transformed_data = transform_soldier_data(soldier_data)
+            transformed_data['timestamp'] = datetime.utcnow().isoformat()
+            
+            # Get the latest session from DB
+            latest_session = await db_in["sessions"].find_one(
+                sort=[("start_time", -1)]
+            )
+            
+            # Update bullet counts for the soldier's team
+            soldier_info = next(
+                (s for s in latest_session["participated_soldiers"] 
+                 if s["soldier_id"] == str(transformed_data['soldier_id'])),
+                None
+            )
+            
+            if soldier_info:
+                team = soldier_info.get("team", "").lower()
+                if team in ["red", "blue"]:
+                    new_bullets = transformed_data.get("bullet_count", 0)
+                    if new_bullets > 0:  # Only update if there are new bullets
+                        app.bullet_counts[f"team_{team}"] += new_bullets
+            
+            # Store the transformed soldier data in MongoDB
+            await store_to_mongo(transformed_data)
+            
+            # Prepare new location object for the soldier
+            new_location = {
+                "latitude": transformed_data['gps']['latitude'],
+                "longitude": transformed_data['gps']['longitude'],
+                "timestamp": transformed_data['timestamp']
+            }
+
+            # Prepare new orientation object for the soldier
+            new_orientation = {
+                "roll": soldier_data.imu_data.roll,
+                "pitch": soldier_data.imu_data.pitch,
+                "yaw": soldier_data.imu_data.yaw,
+                "timestamp": transformed_data['timestamp']
+            }
+            
+            # Store location and orientation in the session document
+            await db_in["sessions"].update_one(
+                {"_id": latest_session["_id"], "participated_soldiers.soldier_id": transformed_data['soldier_id']},
+                {
+                    "$push": {
+                        "participated_soldiers.$.location": new_location,
+                        "participated_soldiers.$.orientation": new_orientation
+                    }
+                }
+            )
+
+            # Broadcast raw soldier data using robust broadcast method
+            await app.ws_service_raw.broadcast(transformed_data)
+
+            # Process damage and kill feed logic if hit_status is 1 or 2
+            if transformed_data['hit_status'] in [1, 2]:
+                attacker_id = transformed_data['ammo']['attacker_id']
+                attacker_id_clean = str(attacker_id).strip()
+                victim_id = transformed_data['soldier_id']
+                victim_id_clean = str(victim_id).strip()
+
+                if not latest_session:
+                    logger.error("No active session found")
+                    continue
+
+                # Fetch attacker and victim data from the latest session
+                attacker_data = await get_soldier_data_from_latest_session(attacker_id_clean)
+                victim_data = await get_soldier_data_from_latest_session(victim_id_clean)
+
+                if not attacker_data or not victim_data:
+                    logger.error(f"Soldier data not found for attacker: {attacker_id}, victim: {victim_id}")
+                    continue
+
+                is_soldier_killed = False
+                
+                # Handle hit_status == 1 (first hit: 50%, second hit: killed)
+                if transformed_data['hit_status'] == 1:
+                    victim_damage = victim_data.get('damage', {})
+                    if '50' not in victim_damage:
+                        await update_soldier_damage(victim_id, 50)
+                        logger.info(f"Updated health for soldier {victim_id} to 50%")
+                    else:
+                        await update_soldier_damage(victim_id, 100)
+                        logger.info(f"Soldier {victim_id} marked as killed (health set to 100%)")
+                        is_soldier_killed = True
+
+                # Handle hit_status == 2 (direct death)
+                elif transformed_data['hit_status'] == 2:
+                    await update_soldier_damage(victim_id, 100)
+                    logger.info(f"Soldier {victim_id} marked as killed (hit_status 2)")
+                    is_soldier_killed = True
+
+                # If soldier is killed, process kill feed and update stats
+                if is_soldier_killed:
+                    calculated_distance = await utils.calculate_distance_between_soldiers(attacker_id, victim_id)
+                    
+                    # Create kill feed event object
+                    kill_event = {
+                        "attacker_id": str(attacker_data['soldier_id']),
+                        "attacker_call_sign": attacker_data['call_sign'],
+                        "victim_id": str(victim_data['soldier_id']),
+                        "victim_call_sign": victim_data['call_sign'],
+                        "distance_to_victim (in meters)": calculated_distance,
+                        "timestamp": transformed_data['timestamp'],
+                    }
+
+                    # Store kill event in session document
+                    update_result = await db_in["sessions"].update_one(
+                        {"_id": latest_session["_id"]},
+                        {
+                            "$push": {
+                                "events": kill_event
+                            }
+                        }
+                    )
+
+                    if update_result.modified_count != 1:
+                        logger.error("Failed to store kill event in session")
+
+                    # Broadcast kill feed event using robust broadcast method
+                    await app.ws_service_kill_feed.broadcast(kill_event)
+
+                    # Update attacker's stats in the session document
+                    try:
+                        attacker_index = next(
+                            (index for (index, soldier) in enumerate(latest_session["participated_soldiers"])
+                            if soldier["soldier_id"] == str(attacker_id)),
+                            None
+                        )
+
+                        if attacker_index is not None:
+                            current_stats = latest_session["participated_soldiers"][attacker_index].get("stats", [])
+                            current_kills = current_stats[-1].get("kill_count", 0) if current_stats else 0
+
+                            new_stat = {
+                                "kill_count": current_kills + 1,
+                                "bullets_fired": transformed_data.get("bullet_count", 0),
+                                "timestamp": datetime.utcnow().isoformat()
+                            }
+
+                            update_result = await db_in["sessions"].update_one(
+                                {"_id": latest_session["_id"]},
+                                {
+                                    "$push": {
+                                        f"participated_soldiers.{attacker_index}.stats": new_stat
+                                    }
+                                }
+                            )
+
+                            if update_result.modified_count != 1:
+                                logger.error(f"Failed to update stats for attacker {attacker_id}")
+                                
+                            # Calculate and broadcast team stats after a kill
+                            await calculate_and_broadcast_team_stats(latest_session["_id"])
+
+                    except Exception as e:
+                        logger.error(f"Error updating attacker stats: {e}", exc_info=True)
+
+            logger.info(f"Processed soldier data: {transformed_data}")
+
+        except Exception as e:
+            logger.error(f"Error processing soldier data: {e}", exc_info=True)
+
+
+# Periodic stats update function with improved error handling
+async def periodic_stats_update():
+    """Background task that periodically updates stats every 5 seconds"""
+    while True:
+        try:
+            await asyncio.sleep(5)  # Update every 5 seconds
+            
+            # Fetch the latest session from DB
+            latest_session = await db_in["sessions"].find_one(
+                sort=[("start_time", -1)]
+            )
+
+            if not latest_session:
+                logger.debug("No active session found for periodic update")
+                continue
+
+            # For each soldier, push a new stats entry with current values
+            for soldier_index, soldier in enumerate(latest_session["participated_soldiers"]):
+                try:
+                    # Get current stats and last stat entry
+                    current_stats = soldier.get("stats", [])
+                    last_stat = current_stats[-1] if current_stats else {"kill_count": 0, "bullets_fired": 0}
+                    
+                    # Create new stat entry with current values and timestamp
+                    new_stat = {
+                        "kill_count": last_stat.get("kill_count", 0),
+                        "bullets_fired": last_stat.get("bullets_fired", 0),
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+
+                    # Push new stat entry to the soldier's stats array in DB
+                    update_result = await db_in["sessions"].update_one(
+                        {"_id": latest_session["_id"]},
+                        {
+                            "$push": {
+                                f"participated_soldiers.{soldier_index}.stats": new_stat
+                            }
+                        }
+                    )
+
+                    if update_result.modified_count != 1:
+                        logger.error(f"Failed to update stats for soldier {soldier.get('soldier_id')}")
+
+                except Exception as e:
+                    logger.error(f"Error updating stats for soldier {soldier.get('soldier_id')}: {e}", exc_info=True)
+
+            # After updating all stats, calculate and broadcast team stats
+            await calculate_and_broadcast_team_stats(latest_session["_id"])
+
+            logger.debug("Periodic stats update completed successfully")
+
+        except Exception as e:
+            logger.error(f"Error in periodic stats update: {e}", exc_info=True)
+            await asyncio.sleep(1)  # Short sleep on error before retrying
+
+
+# Entry point for running the Faust app
+if __name__ == "__main__":
+    app.main()

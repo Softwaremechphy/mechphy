@@ -1,0 +1,80 @@
+import asyncio
+import subprocess
+import sys
+from backend_logic.backendConnection.faust_app_v1 import app as soldier_topic
+from backend_logic.backendConnection.replay_app import app as replay_topic
+from backend_logic.data_ingestion.serial_receiver import receive_serial_data
+
+async def send_to_kafka():
+    """Send received soldier data to Kafka topic."""
+    async for soldier_data in receive_serial_data():
+        if soldier_data:
+            await soldier_topic.send(value=soldier_data, channel="soldiers")
+
+async def run_faust_realtime():
+    """Run the Faust worker for real-time monitoring."""
+    process = await asyncio.create_subprocess_exec(
+        "faust", "-A", "backend_logic.backendConnection.faust_app_v1", "worker", "--loglevel=info"
+    )
+    return process
+
+async def run_faust_replay():
+    """Run the Faust worker for replay mode."""
+    process = await asyncio.create_subprocess_exec(
+        "faust", "-A", "backend_logic.backendConnection.replay_app", "worker", "--loglevel=info"
+    )
+    return process
+
+async def run_fastapi():
+    """Run the FastAPI server."""
+    import uvicorn
+    from backend_logic.backendConnection.fastapi_app import app  # Import your FastAPI app here
+
+    config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="debug")
+    server = uvicorn.Server(config)
+    await server.serve()
+
+async def main(mode="realtime"):
+    # Start the FastAPI server
+    fastapi_task = asyncio.create_task(run_fastapi())
+    print("FastAPI server started.")
+
+    # Select Faust worker based on mode
+    if mode == "realtime":
+        faust_process = await run_faust_realtime()
+        print("Realtime Faust worker started.")
+        
+        # Start sending data to Kafka in real-time mode
+        try:
+            await send_to_kafka()
+            print("Sending data to Kafka in real-time mode.")
+        except Exception as e:
+            print(f"Error during real-time data processing: {e}")
+
+    elif mode == "replay":
+        faust_process = await run_faust_replay()
+        print("Replay Faust worker started.")
+        
+        # Start replaying data here if needed
+        # (If replay has its own specific data sending logic, include that here)
+        
+    else:
+        print(f"Invalid mode selected: {mode}")
+        return
+
+    # Terminate Faust process after FastAPI server completes
+    try:
+        await fastapi_task
+    finally:
+        faust_process.terminate()
+        faust_process.wait()  # Ensure it finishes cleanly
+
+if __name__ == "__main__":
+    mode = sys.argv[1] if len(sys.argv) > 1 else "realtime"  # Default to "realtime" if no mode specified
+    loop = asyncio.get_event_loop()
+
+    try:
+        loop.run_until_complete(main(mode))
+    finally:
+        loop.close()
+        sys.exit(1)

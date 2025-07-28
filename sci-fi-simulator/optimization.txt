@@ -1,0 +1,600 @@
+// components/MapSection.js - Optimized Version
+"use client";
+
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+
+export default function MapSection({ soldiers, selectedSoldierId }) {
+  const mapRef = useRef(null);
+  const markersRef = useRef({});
+  const mapInitializedRef = useRef(false);
+  const mbTilesLayerRef = useRef(null);
+  const mapContainerRef = useRef(null);
+  const updateTimeoutRef = useRef(null);
+  const lastUpdateRef = useRef({});
+
+  const [trailsData, setTrailsData] = useState({});
+  const [colorMap, setColorMap] = useState({});
+  const [loader, setLoader] = useState("Loading SQL.js…");
+  const [mapBounds, setMapBounds] = useState(null);
+  const [mapLoaded, setMapLoaded] = useState(false);
+  const [defaultZoomLevel, setDefaultZoomLevel] = useState(15);
+  const [showControls, setShowControls] = useState(true);
+
+  // Memoized soldier colors array
+  const soldierColors = useMemo(() => [
+    "#FF4C4C", "#4CAF50", "#2196F3", "#FFCA28", "#9C27B0", "#FF9800"
+  ], []);
+  
+  // Memoized color generation function
+  const generateColorFromId = useCallback((id) => {
+    let hash = 0;
+    for (let i = 0; i < id.length; i++) {
+      hash = id.charCodeAt(i) + (hash * 31);
+    }
+    return soldierColors[Math.abs(hash) % soldierColors.length];
+  }, [soldierColors]);
+
+  // Debounced marker update function
+  const updateMarkersDebounced = useCallback(() => {
+    if (updateTimeoutRef.current) {
+      clearTimeout(updateTimeoutRef.current);
+    }
+    
+    updateTimeoutRef.current = setTimeout(() => {
+      if (!mapInitializedRef.current || !mapRef.current) return;
+      
+      const updates = [];
+      
+      soldiers.forEach(({ soldier_id, gps, hit_status, imu }) => {
+        if (!gps || typeof gps.latitude !== "number" || typeof gps.longitude !== "number") {
+          return;
+        }
+
+        const lastUpdate = lastUpdateRef.current[soldier_id];
+        const currentUpdate = {
+          lat: gps.latitude,
+          lng: gps.longitude,
+          hit: hit_status,
+          yaw: imu?.yaw || 0
+        };
+
+        // Skip update if position hasn't changed significantly (within 1 meter)
+        if (lastUpdate && 
+            Math.abs(lastUpdate.lat - currentUpdate.lat) < 0.00001 &&
+            Math.abs(lastUpdate.lng - currentUpdate.lng) < 0.00001 &&
+            lastUpdate.hit === currentUpdate.hit &&
+            Math.abs(lastUpdate.yaw - currentUpdate.yaw) < 5) {
+          return;
+        }
+
+        updates.push({ soldier_id, ...currentUpdate });
+        lastUpdateRef.current[soldier_id] = currentUpdate;
+      });
+
+      // Batch update markers
+      if (updates.length > 0) {
+        updateMarkers(updates);
+      }
+    }, 100); // 100ms debounce
+  }, [soldiers]);
+
+  // Optimized marker update function
+  const updateMarkers = useCallback((updates) => {
+    const fragment = document.createDocumentFragment();
+    
+    updates.forEach(({ soldier_id, lat, lng, hit, yaw }) => {
+      const base = colorMap[soldier_id] || generateColorFromId(soldier_id);
+      const color = hit ? "#ff4444" : base;
+
+      // Create optimized SVG marker
+      const svg = `<svg width="20" height="20" viewBox="0 0 20 20">
+        <circle cx="10" cy="10" r="8" fill="${color}" opacity="0.8"/>
+        <line x1="10" y1="10" x2="10" y2="2" stroke="#000" stroke-width="2" 
+              transform="rotate(${yaw} 10 10)"/>
+      </svg>`;
+
+      if (!markersRef.current[soldier_id]) {
+        const icon = L.divIcon({
+          className: "custom-marker",
+          html: svg,
+          iconSize: [20, 20],
+          iconAnchor: [10, 10],
+        });
+        const marker = L.marker([lat, lng], { icon });
+        marker.bindPopup(() => 
+          `<b>${soldier_id}</b><br/>Lat: ${lat.toFixed(6)}<br/>Lng: ${lng.toFixed(6)}<br/>Color: ${base}`
+        );
+        marker.addTo(mapRef.current);
+        markersRef.current[soldier_id] = marker;
+      } else {
+        const marker = markersRef.current[soldier_id];
+        marker.setLatLng([lat, lng]);
+        
+        const icon = L.divIcon({
+          className: "custom-marker",
+          html: svg,
+          iconSize: [20, 20],
+          iconAnchor: [10, 10],
+        });
+        marker.setIcon(icon);
+      }
+    });
+  }, [colorMap, generateColorFromId]);
+
+  // Optimized MBTiles layer class with caching
+  const createMBTilesLayer = useCallback(() => {
+    class OptimizedMBTilesLayer extends L.TileLayer {
+      constructor(options) {
+        super(options);
+        this._db = null;
+        this._tileCache = new Map();
+        this._maxCacheSize = 200;
+      }
+
+      _getFromCache(key) {
+        if (this._tileCache.has(key)) {
+          const item = this._tileCache.get(key);
+          // Move to end (LRU)
+          this._tileCache.delete(key);
+          this._tileCache.set(key, item);
+          return item;
+        }
+        return null;
+      }
+
+      _setCache(key, value) {
+        if (this._tileCache.size >= this._maxCacheSize) {
+          // Remove oldest item
+          const firstKey = this._tileCache.keys().next().value;
+          this._tileCache.delete(firstKey);
+        }
+        this._tileCache.set(key, value);
+      }
+
+      loadMBTilesFromArrayBuffer = (buf) => {
+        try {
+          console.log("Loading MBTiles, size:", buf.byteLength);
+          this._db = new window.SQL.Database(new Uint8Array(buf));
+          this._getMetadata();
+          setLoader("");
+          setMapLoaded(true);
+          setShowControls(false);
+          this.redraw();
+        } catch (error) {
+          console.error("Error loading MBTiles:", error);
+          setLoader(`Error: ${error.message}`);
+        }
+      };
+
+      _getMetadata = () => {
+        if (!this._db) return;
+        
+        try {
+          const metaStmt = this._db.prepare("SELECT name, value FROM metadata");
+          const metadata = {};
+          
+          while (metaStmt.step()) {
+            const row = metaStmt.getAsObject();
+            metadata[row.name] = row.value;
+          }
+          metaStmt.free();
+          
+          // Get zoom levels efficiently
+          const zoomStmt = this._db.prepare("SELECT MIN(zoom_level) as min_zoom, MAX(zoom_level) as max_zoom FROM tiles");
+          zoomStmt.step();
+          const { min_zoom, max_zoom } = zoomStmt.getAsObject();
+          zoomStmt.free();
+          
+          this.options.minZoom = min_zoom;
+          this.options.maxZoom = Math.min(max_zoom, 21);
+          
+          if (mapRef.current) {
+            mapRef.current.setMinZoom(min_zoom);
+            mapRef.current.setMaxZoom(Math.min(max_zoom, 21));
+          }
+          
+          if (metadata.bounds) {
+            const bounds = metadata.bounds.split(',').map(Number);
+            if (bounds.length === 4) {
+              const leafletBounds = L.latLngBounds([bounds[1], bounds[0]], [bounds[3], bounds[2]]);
+              setMapBounds(leafletBounds);
+              
+              const idealZoom = mapRef.current?.getBoundsZoom(leafletBounds) || 15;
+              const clampedZoom = Math.max(min_zoom, Math.min(idealZoom, max_zoom - 1));
+              setDefaultZoomLevel(clampedZoom);
+              
+              setTimeout(() => {
+                mapRef.current?.fitBounds(leafletBounds, { 
+                  maxZoom: clampedZoom,
+                  padding: [10, 10]
+                });
+              }, 100);
+            }
+          }
+        } catch (error) {
+          console.error("Error reading metadata:", error);
+        }
+      };
+
+      loadMBTilesFromPath = (path) => {
+        setLoader(`Loading ${path}…`);
+        setMapLoaded(false);
+        
+        fetch(path)
+          .then(response => {
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return response.arrayBuffer();
+          })
+          .then(this.loadMBTilesFromArrayBuffer)
+          .catch(e => {
+            console.error("Error loading MBTiles:", e);
+            setLoader(`Error: ${e.message}`);
+          });
+      };
+
+      createTile(coords, done) {
+        const img = document.createElement("img");
+        
+        if (!this._db) {
+          img.src = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQIHWNgAAIAAAUAAY27m/MAAAAASUVORK5CYII=";
+          setTimeout(() => done(null, img), 50);
+          return img;
+        }
+        
+        const { z, x } = coords;
+        const y = Math.pow(2, z) - coords.y - 1;
+        const cacheKey = `${z}/${x}/${y}`;
+        
+        // Check cache first
+        const cached = this._getFromCache(cacheKey);
+        if (cached) {
+          img.src = cached;
+          setTimeout(() => done(null, img), 0);
+          return img;
+        }
+        
+        try {
+          const stmt = this._db.prepare("SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?");
+          stmt.bind([z, x, y]);
+          
+          if (stmt.step()) {
+            const data = stmt.getAsObject().tile_data;
+            
+            if (data && data.length > 0) {
+              const blob = new Blob([new Uint8Array(data)], { type: "image/png" });
+              const url = URL.createObjectURL(blob);
+              
+              // Cache the URL
+              this._setCache(cacheKey, url);
+              
+              img.onload = () => done(null, img);
+              img.onerror = () => {
+                URL.revokeObjectURL(url);
+                img.src = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQIHWNgAAIAAAUAAY27m/MAAAAASUVORK5CYII=";
+                done(null, img);
+              };
+              img.src = url;
+            } else {
+              img.src = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQIHWNgAAIAAAUAAY27m/MAAAAASUVORK5CYII=";
+              done(null, img);
+            }
+          } else {
+            img.src = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQIHWNgAAIAAAUAAY27m/MAAAAASUVORK5CYII=";
+            done(null, img);
+          }
+          stmt.free();
+        } catch (error) {
+          console.error(`Tile error ${z}/${x}/${y}:`, error);
+          img.src = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQIHWNgAAIAAAUAAY27m/MAAAAASUVORK5CYII=";
+          done(null, img);
+        }
+        
+        return img;
+      }
+    }
+
+    return OptimizedMBTilesLayer;
+  }, []);
+
+  // Initialize map only once
+  useEffect(() => {
+    const container = document.getElementById("mapid");
+    if (!container || mapInitializedRef.current) return;
+
+    mapContainerRef.current = container;
+
+    // Load CSS
+    const cssId = "leaflet-css";
+    if (!document.getElementById(cssId)) {
+      const link = document.createElement("link");
+      link.id = cssId;
+      link.rel = "stylesheet";
+      link.href = "/leaflet.css";
+      document.head.appendChild(link);
+    }
+
+    // Load dependencies
+    Promise.all([
+      import("leaflet"),
+      new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = "/sqljs/sql-wasm.js";
+        script.onload = () => {
+          window.initSqlJs({ locateFile: () => "/sqljs/sql-wasm.wasm" })
+            .then(resolve)
+            .catch(reject);
+        };
+        script.onerror = reject;
+        document.body.appendChild(script);
+      })
+    ])
+    .then(([leafletMod, SQL]) => {
+      if (mapInitializedRef.current) return;
+
+      const L = leafletMod.default || leafletMod;
+      window.SQL = SQL;
+
+      setLoader("Initializing map…");
+
+      mapRef.current = L.map("mapid", {
+        center: [28.5471399, 77.1945754],
+        zoom: 15,
+        minZoom: 10,
+        maxZoom: 21,
+        preferCanvas: true,
+        zoomControl: true,
+        attributionControl: false
+      });
+
+      const MBTilesLayer = createMBTilesLayer();
+      mbTilesLayerRef.current = new MBTilesLayer({
+        minZoom: 1,
+        maxZoom: 21,
+        tms: true,
+        errorTileUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQIHWNgAAIAAAUAAY27m/MAAAAASUVORK5CYII=",
+        keepBuffer: 2,
+        updateWhenIdle: true,
+        updateWhenZooming: false
+      });
+      
+      mbTilesLayerRef.current.addTo(mapRef.current);
+      setLoader("Please load Map file");
+      mapInitializedRef.current = true;
+    })
+    .catch(error => {
+      console.error("Map initialization failed:", error);
+      setLoader(`Error: ${error.message}`);
+    });
+
+    return () => {
+      if (updateTimeoutRef.current) clearTimeout(updateTimeoutRef.current);
+      if (mapRef.current) {
+        mapRef.current.remove();
+        mapRef.current = null;
+      }
+      mapInitializedRef.current = false;
+      markersRef.current = {};
+      lastUpdateRef.current = {};
+    };
+  }, [createMBTilesLayer]);
+
+  // Optimize color map updates
+  useEffect(() => {
+    const newSoldiers = soldiers.filter(({ soldier_id }) => !colorMap[soldier_id]);
+    if (newSoldiers.length === 0) return;
+
+    setColorMap(prev => {
+      const next = { ...prev };
+      newSoldiers.forEach(({ soldier_id }) => {
+        next[soldier_id] = generateColorFromId(soldier_id);
+      });
+      return next;
+    });
+  }, [soldiers, colorMap, generateColorFromId]);
+
+  // Optimize trail data updates
+  useEffect(() => {
+    const updates = {};
+    let hasUpdates = false;
+
+    soldiers.forEach(({ soldier_id, gps }) => {
+      if (gps && typeof gps.latitude === "number" && typeof gps.longitude === "number") {
+        const current = trailsData[soldier_id] || [];
+        const newPoint = [gps.latitude, gps.longitude];
+        const lastPoint = current[current.length - 1];
+        
+        if (!lastPoint || 
+            Math.abs(lastPoint[0] - newPoint[0]) > 0.00001 || 
+            Math.abs(lastPoint[1] - newPoint[1]) > 0.00001) {
+          updates[soldier_id] = [...current, newPoint].slice(-100); // Keep last 100 points
+          hasUpdates = true;
+        }
+      }
+    });
+
+    if (hasUpdates) {
+      setTrailsData(prev => ({ ...prev, ...updates }));
+    }
+  }, [soldiers, trailsData]);
+
+  // Use debounced marker updates
+  useEffect(() => {
+    if (soldiers.length > 0) {
+      updateMarkersDebounced();
+    }
+  }, [soldiers, updateMarkersDebounced]);
+
+  // Optimized trail rendering
+  const updateTrails = useCallback(() => {
+    if (!mapInitializedRef.current || !mapRef.current) return;
+    
+    const map = mapRef.current;
+    
+    // Clear existing trails
+    Object.values(markersRef.current).forEach(marker => {
+      if (marker.trail) {
+        map.removeLayer(marker.trail);
+        delete marker.trail;
+      }
+    });
+    
+    if (!selectedSoldierId) {
+      // Show all trails
+      Object.entries(trailsData).forEach(([id, coords]) => {
+        if (coords.length < 2) return;
+        const color = colorMap[id] || generateColorFromId(id);
+        const polyline = L.polyline(coords, {
+          color,
+          weight: 2,
+          opacity: 0.6,
+          dashArray: "4,6",
+        });
+        polyline.addTo(map);
+        if (markersRef.current[id]) {
+          markersRef.current[id].trail = polyline;
+        }
+      });
+      
+      Object.values(markersRef.current).forEach(marker => marker.setOpacity(1));
+    } else {
+      // Show selected soldier trail
+      const coords = trailsData[selectedSoldierId] || [];
+      if (coords.length > 1) {
+        const color = colorMap[selectedSoldierId] || generateColorFromId(selectedSoldierId);
+        const polyline = L.polyline(coords, {
+          color,
+          weight: 3,
+          opacity: 0.8,
+          dashArray: "4,2",
+        });
+        polyline.addTo(map);
+        if (markersRef.current[selectedSoldierId]) {
+          markersRef.current[selectedSoldierId].trail = polyline;
+        }
+      }
+      
+      Object.entries(markersRef.current).forEach(([id, marker]) =>
+        marker.setOpacity(id === selectedSoldierId ? 1 : 0.3)
+      );
+      
+      const selectedMarker = markersRef.current[selectedSoldierId];
+      if (selectedMarker) {
+        map.setView(selectedMarker.getLatLng(), map.getZoom());
+      }
+    }
+  }, [trailsData, selectedSoldierId, colorMap, generateColorFromId]);
+
+  useEffect(() => {
+    updateTrails();
+  }, [updateTrails]);
+
+  // Event handlers
+  const onPath = useCallback(() => {
+    const path = document.getElementById("filepath")?.value;
+    if (path && mbTilesLayerRef.current) {
+      mbTilesLayerRef.current.loadMBTilesFromPath(path);
+    }
+  }, []);
+  
+  const onFile = useCallback((e) => {
+    const file = e.target.files?.[0];
+    if (file && mbTilesLayerRef.current) {
+      const reader = new FileReader();
+      reader.onload = () => mbTilesLayerRef.current.loadMBTilesFromArrayBuffer(reader.result);
+      reader.readAsArrayBuffer(file);
+    }
+  }, []);
+
+  const onFitBounds = useCallback(() => {
+    if (mapBounds && mapRef.current) {
+      mapRef.current.fitBounds(mapBounds, { maxZoom: 18, padding: [20, 20] });
+    }
+  }, [mapBounds]);
+
+  const onDebugTiles = useCallback(() => {
+    if (mbTilesLayerRef.current?._db) {
+      const db = mbTilesLayerRef.current._db;
+      console.log("=== Debug Info ===");
+      console.log("Soldiers:", soldiers.length);
+      console.log("Trails:", Object.keys(trailsData).length);
+      console.log("Cache size:", mbTilesLayerRef.current._tileCache?.size || 0);
+    }
+  }, [soldiers.length, trailsData]);
+
+  return (
+    <div style={{ position: "relative", height: "100%", width: "100%" }}>
+      {/* Styles remain the same - keeping them for brevity */}
+      <style jsx>{`
+        .scifi-panel {
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+          z-index: 1000;
+          background: linear-gradient(135deg, rgba(0, 20, 40, 0.95) 0%, rgba(0, 40, 80, 0.95) 100%);
+          border: 2px solid #00ffff;
+          border-radius: 12px;
+          padding: 24px;
+          box-shadow: 0 0 20px rgba(0, 255, 255, 0.3), inset 0 0 20px rgba(0, 255, 255, 0.1);
+          backdrop-filter: blur(10px);
+          min-width: 400px;
+          animation: glow 2s ease-in-out infinite alternate;
+        }
+        @keyframes glow {
+          from { box-shadow: 0 0 20px rgba(0, 255, 255, 0.3), inset 0 0 20px rgba(0, 255, 255, 0.1); }
+          to { box-shadow: 0 0 30px rgba(0, 255, 255, 0.5), inset 0 0 30px rgba(0, 255, 255, 0.2); }
+        }
+        .scifi-title {
+          color: #00ffff;
+          text-align: center;
+          font-family: 'Courier New', monospace;
+          font-size: 18px;
+          font-weight: bold;
+          margin-bottom: 20px;
+          text-shadow: 0 0 10px rgba(0, 255, 255, 0.8);
+          letter-spacing: 2px;
+        }
+        .scifi-button {
+          background: linear-gradient(135deg, #00ffff 0%, #0080ff 100%);
+          border: none;
+          border-radius: 6px;
+          padding: 10px 20px;
+          color: #001122;
+          font-family: 'Courier New', monospace;
+          font-size: 12px;
+          font-weight: bold;
+          text-transform: uppercase;
+          letter-spacing: 1px;
+          cursor: pointer;
+          transition: all 0.3s ease;
+          width: 100%;
+          margin-bottom: 8px;
+        }
+      `}</style>
+
+      {loader && (
+        <div style={{
+          position: "absolute", top: "20px", left: "50%", transform: "translateX(-50%)",
+          zIndex: 1000, background: "rgba(0, 20, 40, 0.95)", border: "1px solid #00ffff",
+          borderRadius: "8px", padding: "12px 20px", color: "#66fcf1",
+          fontFamily: "'Courier New', monospace", fontSize: "14px"
+        }}>
+          {loader}
+        </div>
+      )}
+      
+      {showControls && !mapLoaded && (
+        <div className="scifi-panel">
+          <div className="scifi-title">SELECT MAP</div>
+          <input id="filepath" placeholder="Enter path to .mbtiles file" />
+          <button className="scifi-button" onClick={onPath}>Load From Path</button>
+          <input type="file" accept=".mbtiles" onChange={onFile} />
+          {mapBounds && <button className="scifi-button" onClick={onFitBounds}>Fit Bounds</button>}
+          <button className="scifi-button" onClick={onDebugTiles}>Debug</button>
+        </div>
+      )}
+      
+      <div id="mapid" style={{ height: "100%", width: "100%", background: "#0a0a0a" }} />
+    </div>
+  );
+}
