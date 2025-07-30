@@ -1,167 +1,353 @@
-    #backend_logic/routes_in/session.py
+#     #backend_logic/routes_in/session.py
+
+# backend_logic/routes_in/session.py
 from fastapi import APIRouter, Depends, HTTPException, status
-from typing import List
+from typing import List, Optional
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from datetime import datetime
-from backend_logic.pydantic_responses_in import sessions_pydantic  # Assume this file contains your pydantic models
+
+from backend_logic.pydantic_responses_in import sessions_pydantic
 from db.mongodb_handler import get_db_in, get_db_out
 from configs.config import settings
-from typing import Optional
 
 router = APIRouter(
     prefix="/api/sessions",
-    tags = ["sessions_inside_monitoring"]
+    tags=["sessions_inside_monitoring"]
 )
 
-# Get all roles 
+# ─────────────────────────────── ENUM LOOK-UPS ──────────────────────────────
 @router.get("/enum/roles", response_model=List[str])
-async def get_roles():
-    """
-    Fetch all roles from the hardcoded RoleEnum.
-    """
+async def get_roles() -> List[str]:
+    """Return all allowed role values."""
     return [role.value for role in sessions_pydantic.RoleEnum]
 
-# Get all equipments
+
 @router.get("/enum/equipments", response_model=List[str])
-async def get_equipment():
-    """
-    Fetch all equipment from the hardcoded EquipmentEnum.
-    """
-    return [equipment.value for equipment in sessions_pydantic.EquipmentEnum]
+async def get_equipment() -> List[str]:
+    """Return all allowed equipment values."""
+    return [equip.value for equip in sessions_pydantic.EquipmentEnum]
 
-
-# Creation of session in the database
-@router.post("/", response_model=sessions_pydantic.SessionBase, status_code=status.HTTP_201_CREATED)
+# ───────────────────────────── SESSION CREATE ───────────────────────────────
+@router.post("/", response_model=sessions_pydantic.SessionBase,
+             status_code=status.HTTP_201_CREATED)
 async def create_session(db: AsyncIOMotorDatabase = Depends(get_db_in)):
-    
-    # Find the latest added session document based on session_id
-    latest_session = await db.sessions.find_one(
-        sort=[("start_time", -1)]  # Sort by session_id in descending order
-    )
-    
-    # Determine the new session ID
-    if latest_session and "session_id" in latest_session:
-        new_session_id = str(int(latest_session["session_id"]) + 1)
-    else:
-        new_session_id = "1"  # If no sessions exist, start with ID "1"
+    """
+    Create a new session, auto-incrementing session_id and resetting
+    in-memory bullet counters.
+    """
+    # Find the latest session to determine next ID
+    latest_session = await db.sessions.find_one(sort=[("start_time", -1)])
+    next_id = str(int(latest_session["session_id"]) + 1) if latest_session else "1"
 
-    # Create the session data
     session_data = {
-        "session_id": new_session_id,
+        "session_id": next_id,
         "start_time": datetime.utcnow(),
-        "participated_soldiers": [],  # Initially empty, filled during resource allocation
+        "participated_soldiers": [],
         "events": []
     }
-
-    # Insert the new session into the database
     result = await db.sessions.insert_one(session_data)
 
-    # Return the created session
+    # RESET bullet counters (borrowed from Code 2)
+    from backend_logic.backendConnection.faust_app_v1 import app
+    app.bullet_counts = {"team_red": 0, "team_blue": 0}
+
     return sessions_pydantic.SessionInDB(**session_data, mongo_id=result.inserted_id)
 
-
-
-# Resource allocation
-@router.put("/{session_id}/allocate", response_model=sessions_pydantic.SessionBase, status_code=status.HTTP_200_OK)
+# ─────────────────────────── RESOURCE ALLOCATION ────────────────────────────
+@router.put("/{session_id}/allocate",
+            response_model=sessions_pydantic.SessionBase,
+            status_code=status.HTTP_200_OK)
 async def allocate_resources(
-    session_id: str, 
-    allocation_data: sessions_pydantic.ResourceAllocation,  # Use the new Pydantic model here
+    session_id: str,
+    allocation_data: sessions_pydantic.ResourceAllocation,
     db: AsyncIOMotorDatabase = Depends(get_db_in),
     db_out: AsyncIOMotorDatabase = Depends(get_db_out)
 ):
-    # Retrieve the session
+    """
+    Add soldiers to a session, assigning *both* external soldier_id and an
+    internal sequential session_soldier_id (skip 69).
+    """
     session = await db.sessions.find_one({"session_id": session_id})
     if session is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+        raise HTTPException(status_code=404, detail="Session not found")
 
-    # Parse team/squad/soldier data from the frontend
-    for team_name, team in allocation_data.dict().items():  
-        team_identifier = team_name.split('_')[1]  # This will give 'blue' or 'red'
-
+    # ── flatten soldiers so we can assign sequential IDs ──
+    flattened = []  # (team_identifier, squad_name, soldier_dict)
+    for team_name, team in allocation_data.dict().items():
+        team_id = team_name.split("_")[1]  # 'blue' or 'red'
         for squad_name, squad in team.items():
-            for soldier in squad['soldiers']:
-                soldier_id = soldier["soldier_id"]
+            for soldier in squad["soldiers"]:
+                flattened.append((team_id, squad_name, soldier))
 
-                soldier_collection = db_out[settings.SOLDIER_COLLECTION]
-                weapons_collection = db_out[settings.WEAPONS_COLLECTION]
-                vests_collection = db_out[settings.VEST_COLLECTION]
+    total = len(flattened)
+    seq = 1
+    session["participated_soldiers"] = []
 
-                # Fetch the call_sign from db_out using soldier_id
-                soldier_data_from_out = await soldier_collection.find_one({"soldier_id": soldier_id})
-                if not soldier_data_from_out:
-                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Soldier with ID {soldier_id} not found")
+    for idx, (team_id, squad_name, soldier) in enumerate(flattened):
+        if seq == 69:
+            seq += 1               # skip unlucky 69
+        session_soldier_id = 70 if (idx == total - 1 and total == 69) else seq
 
-                call_sign = soldier_data_from_out.get("call_sign", "Unknown")
+        soldier_id = soldier["soldier_id"]
 
-                # Validate weapon_id and vest_id
-                weapon_id = soldier["weapon_id"]
-                vest_id = soldier["vest_id"]
+        # ── look up refs in OUT DB ──
+        soldier_doc = await db_out[settings.SOLDIER_COLLECTION].find_one({"soldier_id": soldier_id})
+        if not soldier_doc:
+            raise HTTPException(status_code=404, detail=f"Soldier {soldier_id} not found")
+        call_sign = soldier_doc.get("call_sign", "Unknown")
 
-                # Check if the weapon_id exists in db_out
-                weapon_exists = await weapons_collection.find_one({"weapon_id": weapon_id})
-                if not weapon_exists:
-                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Weapon with ID {weapon_id} not found")
+        # validate weapon, vest
+        if not await db_out[settings.WEAPONS_COLLECTION].find_one({"weapon_id": soldier["weapon_id"]}):
+            raise HTTPException(status_code=400, detail=f"Weapon {soldier['weapon_id']} not found")
+        if not await db_out[settings.VEST_COLLECTION].find_one({"vest_id": soldier["vest_id"]}):
+            raise HTTPException(status_code=400, detail=f"Vest {soldier['vest_id']} not found")
 
-                # Check if the vest_id exists in db_out
-                vest_exists = await vests_collection.find_one({"vest_id": vest_id})
-                if not vest_exists:
-                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Vest with ID {vest_id} not found")
+        # validate enums (case-insensitive)
+        role_key = soldier["role"].strip().lower()
+        equip_key = soldier["equipment"].strip().lower()
+        if role_key not in {r.lower(): r for r in sessions_pydantic.RoleEnum.__members__}:
+            raise HTTPException(status_code=400, detail=f"Invalid role: {role_key}")
+        if equip_key not in {e.lower(): e for e in sessions_pydantic.EquipmentEnum.__members__}:
+            raise HTTPException(status_code=400, detail=f"Invalid equipment: {equip_key}")
 
-                # Ensure role and equipment values are valid
-                try:
-                    role = soldier["role"].strip().lower()  # Normalize to lowercase
-                    equipment = soldier["equipment"].strip().lower()  # Normalize to lowercase
-                except KeyError as e:
-                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Missing field: {str(e)}")
+        # build soldier entry
+        soldier_entry = sessions_pydantic.SoldierInSession(
+            session_soldier_id=session_soldier_id,
+            soldier_id=soldier_id,
+            call_sign=call_sign,
+            weapon_id=soldier["weapon_id"],
+            vest_id=soldier["vest_id"],
+            role=role_key,
+            equipment=equip_key,
+            team=team_id,
+            squad=int(squad_name.split("_")[1]),
+            location=[],
+            orientation=[],
+            event_data=[],
+            died=None
+        )
+        session["participated_soldiers"].append(soldier_entry.dict())
+        seq += 1
 
-                # Ensure role is valid (case-insensitive check)
-                valid_roles = {role.lower(): role for role in sessions_pydantic.RoleEnum.__members__}  # Create a case-insensitive mapping
-                if role not in valid_roles:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Invalid role: {role}. Must be one of {list(valid_roles.keys())}."
-                    )
-                normalized_role = valid_roles[role]  # Use the normalized valid role
-
-                # Ensure equipment is valid (case-insensitive check)
-                valid_equipments = {equipment.lower(): equipment for equipment in sessions_pydantic.EquipmentEnum.__members__}
-                if equipment not in valid_equipments:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Invalid equipment: {equipment}. Must be one of {list(valid_equipments.keys())}."
-                    )
-                normalized_equipment = valid_equipments[equipment]  # Use the normalized valid equipment
-
-                # Create soldier data with the fetched call_sign
-                soldier_data = sessions_pydantic.SoldierInSession(
-                    soldier_id=soldier_id,
-                    call_sign=call_sign,  # Use fetched call_sign
-                    weapon_id=weapon_id,
-                    vest_id=vest_id,
-                    role=normalized_role,
-                    equipment=normalized_equipment,
-                    team=team_identifier,  # Include team name
-                    squad=int(squad_name.split("_")[1]),  # Parse squad number from squad name (e.g., squad_1 -> 1)
-                    location=[],
-                    orientation=[],
-                    event_data=[],
-                    died=None
-                )
-                # Add the soldier to the session's participated_soldiers list
-                session["participated_soldiers"].append(soldier_data.dict())
-
-    # Add received_data to the session
     session["received_data"] = allocation_data.dict()
-
-    # Update the session in the database
     await db.sessions.update_one(
         {"session_id": session_id},
-        {"$set": {"participated_soldiers": session["participated_soldiers"], "received_data": session["received_data"]}}
+        {"$set": {
+            "participated_soldiers": session["participated_soldiers"],
+            "received_data": session["received_data"]
+        }}
     )
+    updated = await db.sessions.find_one({"session_id": session_id})
+    return sessions_pydantic.SessionInDB(**updated)
 
-    # Retrieve the updated session and return it
-    updated_session = await db.sessions.find_one({"session_id": session_id})
-    return sessions_pydantic.SessionInDB(**updated_session)
+# ──────────────────────────── SET MAP NAME ──────────────────────────────────
+@router.put("/{session_id}/map-name",
+            response_model=sessions_pydantic.SessionBase)
+async def update_map_name(
+    session_id: str,
+    map_name: str,
+    db: AsyncIOMotorDatabase = Depends(get_db_in)
+):
+    """Attach or change the map_name for a session."""
+    if not (session := await db.sessions.find_one({"session_id": session_id})):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    await db.sessions.update_one({"session_id": session_id},
+                                 {"$set": {"map_name": map_name}})
+    updated = await db.sessions.find_one({"session_id": session_id})
+    return sessions_pydantic.SessionInDB(**updated)
+
+# ───────────────────── remaining helper endpoints (unchanged) ───────────────
+# … get_received_data, get_latest_soldier_stat, get_start_end_time, delete_session …
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# from fastapi import APIRouter, Depends, HTTPException, status
+# from typing import List
+# from motor.motor_asyncio import AsyncIOMotorDatabase
+# from datetime import datetime
+# from backend_logic.pydantic_responses_in import sessions_pydantic  # Assume this file contains your pydantic models
+# from db.mongodb_handler import get_db_in, get_db_out
+# from configs.config import settings
+# from typing import Optional
+
+# router = APIRouter(
+#     prefix="/api/sessions",
+#     tags = ["sessions_inside_monitoring"]
+# )
+
+# # Get all roles 
+# @router.get("/enum/roles", response_model=List[str])
+# async def get_roles():
+#     """
+#     Fetch all roles from the hardcoded RoleEnum.
+#     """
+#     return [role.value for role in sessions_pydantic.RoleEnum]
+
+# # Get all equipments
+# @router.get("/enum/equipments", response_model=List[str])
+# async def get_equipment():
+#     """
+#     Fetch all equipment from the hardcoded EquipmentEnum.
+#     """
+#     return [equipment.value for equipment in sessions_pydantic.EquipmentEnum]
+
+
+# Creation of session in the database
+# @router.post("/", response_model=sessions_pydantic.SessionBase, status_code=status.HTTP_201_CREATED)
+# async def create_session(db: AsyncIOMotorDatabase = Depends(get_db_in)):
+    
+#     # Find the latest added session document based on session_id
+#     latest_session = await db.sessions.find_one(
+#         sort=[("start_time", -1)]  # Sort by session_id in descending order
+#     )
+    
+#     # Determine the new session ID
+#     if latest_session and "session_id" in latest_session:
+#         new_session_id = str(int(latest_session["session_id"]) + 1)
+#     else:
+#         new_session_id = "1"  # If no sessions exist, start with ID "1"
+
+#     # Create the session data
+#     session_data = {
+#         "session_id": new_session_id,
+#         "start_time": datetime.utcnow(),
+#         "participated_soldiers": [],  # Initially empty, filled during resource allocation
+#         "events": []
+#     }
+
+#     # Insert the new session into the database
+#     result = await db.sessions.insert_one(session_data)
+
+#     # Reset bullet counts for the new session
+#     from backend_logic.backendConnection.faust_app_v1 import app  # Import your Faust app instance if needed
+#     app.bullet_counts = {"team_red": 0, "team_blue": 0}
+    
+#     # Return the created session
+#     return sessions_pydantic.SessionInDB(**session_data, mongo_id=result.inserted_id)
+
+
+
+# # Resource allocation
+# @router.put("/{session_id}/allocate", response_model=sessions_pydantic.SessionBase, status_code=status.HTTP_200_OK)
+# async def allocate_resources(
+#     session_id: str, 
+#     allocation_data: sessions_pydantic.ResourceAllocation,  # Use the new Pydantic model here
+#     db: AsyncIOMotorDatabase = Depends(get_db_in),
+#     db_out: AsyncIOMotorDatabase = Depends(get_db_out)
+# ):
+#     # Retrieve the session
+#     session = await db.sessions.find_one({"session_id": session_id})
+#     if session is None:
+#         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+#     # Parse team/squad/soldier data from the frontend
+#     for team_name, team in allocation_data.dict().items():  
+#         team_identifier = team_name.split('_')[1]  # This will give 'blue' or 'red'
+
+#         for squad_name, squad in team.items():
+#             for soldier in squad['soldiers']:
+#                 soldier_id = soldier["soldier_id"]
+
+#                 soldier_collection = db_out[settings.SOLDIER_COLLECTION]
+#                 weapons_collection = db_out[settings.WEAPONS_COLLECTION]
+#                 vests_collection = db_out[settings.VEST_COLLECTION]
+
+#                 # Fetch the call_sign from db_out using soldier_id
+#                 soldier_data_from_out = await soldier_collection.find_one({"soldier_id": soldier_id})
+#                 if not soldier_data_from_out:
+#                     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Soldier with ID {soldier_id} not found")
+
+#                 call_sign = soldier_data_from_out.get("call_sign", "Unknown")
+
+#                 # Validate weapon_id and vest_id
+#                 weapon_id = soldier["weapon_id"]
+#                 vest_id = soldier["vest_id"]
+
+#                 # Check if the weapon_id exists in db_out
+#                 weapon_exists = await weapons_collection.find_one({"weapon_id": weapon_id})
+#                 if not weapon_exists:
+#                     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Weapon with ID {weapon_id} not found")
+
+#                 # Check if the vest_id exists in db_out
+#                 vest_exists = await vests_collection.find_one({"vest_id": vest_id})
+#                 if not vest_exists:
+#                     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Vest with ID {vest_id} not found")
+
+#                 # Ensure role and equipment values are valid
+#                 try:
+#                     role = soldier["role"].strip().lower()  # Normalize to lowercase
+#                     equipment = soldier["equipment"].strip().lower()  # Normalize to lowercase
+#                 except KeyError as e:
+#                     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Missing field: {str(e)}")
+
+#                 # Ensure role is valid (case-insensitive check)
+#                 valid_roles = {role.lower(): role for role in sessions_pydantic.RoleEnum.__members__}  # Create a case-insensitive mapping
+#                 if role not in valid_roles:
+#                     raise HTTPException(
+#                         status_code=status.HTTP_400_BAD_REQUEST,
+#                         detail=f"Invalid role: {role}. Must be one of {list(valid_roles.keys())}."
+#                     )
+#                 normalized_role = valid_roles[role]  # Use the normalized valid role
+
+#                 # Ensure equipment is valid (case-insensitive check)
+#                 valid_equipments = {equipment.lower(): equipment for equipment in sessions_pydantic.EquipmentEnum.__members__}
+#                 if equipment not in valid_equipments:
+#                     raise HTTPException(
+#                         status_code=status.HTTP_400_BAD_REQUEST,
+#                         detail=f"Invalid equipment: {equipment}. Must be one of {list(valid_equipments.keys())}."
+#                     )
+#                 normalized_equipment = valid_equipments[equipment]  # Use the normalized valid equipment
+
+#                 # Create soldier data with the fetched call_sign
+#                 soldier_data = sessions_pydantic.SoldierInSession(
+#                     soldier_id=soldier_id,
+#                     call_sign=call_sign,  # Use fetched call_sign
+#                     weapon_id=weapon_id,
+#                     vest_id=vest_id,
+#                     role=normalized_role,
+#                     equipment=normalized_equipment,
+#                     team=team_identifier,  # Include team name
+#                     squad=int(squad_name.split("_")[1]),  # Parse squad number from squad name (e.g., squad_1 -> 1)
+#                     location=[],
+#                     orientation=[],
+#                     event_data=[],
+#                     died=None
+#                 )
+#                 # Add the soldier to the session's participated_soldiers list
+#                 session["participated_soldiers"].append(soldier_data.dict())
+
+#     # Add received_data to the session
+#     session["received_data"] = allocation_data.dict()
+
+#     # Update the session in the database
+#     await db.sessions.update_one(
+#         {"session_id": session_id},
+#         {"$set": {"participated_soldiers": session["participated_soldiers"], "received_data": session["received_data"]}}
+#     )
+
+#     # Retrieve the updated session and return it
+#     updated_session = await db.sessions.find_one({"session_id": session_id})
+#     return sessions_pydantic.SessionInDB(**updated_session)
 
 
 

@@ -23,7 +23,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import utils
 
 # FastAPI app and MongoDB client initialization
-app = FastAPI()
+fastapi_app = FastAPI()
 client = AsyncIOMotorClient(settings.MONGODB_URI)
 db_in = client[settings.DB_in]
 
@@ -246,13 +246,19 @@ async def process_soldiers(soldier_data_stream):
                 sort=[("start_time", -1)]
             )
             
-            # Update bullet counts for the soldier's team
+            if not latest_session:
+                logger.error("No active session found")
+                continue  # Use continue if inside async for loop, return if inside a function
+
+            
             soldier_info = next(
                 (s for s in latest_session["participated_soldiers"] 
                  if s["soldier_id"] == str(transformed_data['soldier_id'])),
                 None
             )
             
+            
+            # Update bullet counts for the soldier's team
             if soldier_info:
                 team = soldier_info.get("team", "").lower()
                 if team in ["red", "blue"]:
