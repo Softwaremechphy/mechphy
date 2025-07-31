@@ -2,6 +2,7 @@ import aioserial
 import asyncio
 import re
 import logging
+from backend_logic.backendConnection.faust_app_v1 import app
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -130,7 +131,7 @@ async def parse_raw_data(raw_data: str) -> SoldierData:
 # Repeating receive_serial_data to solve a bug on 2/06/25
 async def receive_serial_data():
     """Asynchronously read and process serial data using aioserial."""
-    while True:
+    while not app.should_stop_realtime:
         ser = None
         try:
             ser = aioserial.AioSerial(port='/dev/ttyUSB0', baudrate=9600, timeout=1)

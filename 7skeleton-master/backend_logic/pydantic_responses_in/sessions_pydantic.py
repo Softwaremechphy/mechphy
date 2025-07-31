@@ -149,25 +149,144 @@ class SoldierInSession(BaseModel):
     class Config:
         schema_extra = {
             "example": {
-                "soldier_id": "S123",
-                "call_sign": "Alpha",
-                "weapon_id": "W1",
-                "vest_id": "V2",
-                "team": "blue",
-                "squad": 1,
-                "location": [
-                    {"latitude": 34.12345, "longitude": -117.12345, "timestamp": "2024-10-03T12:00:00"}
-                ],
-                "orientation": [
-                    {"accl_x": 0.5, "accl_y": 1.2, "accl_z": 0.3, "timestamp": "2024-10-03T12:00:05"}
-                ],
-                "event_data": [
-                    {"event_type": "killed", "related_soldier_id": "S456", "timestamp": "2024-10-03T12:10:00"}
-                ],
-                "died": "2024-10-03T12:20:00",
-                "stats": [
-                    {"kill_count": 2, "bullets_fired": 15, "timestamp": "2024-10-03T12:05:00"}
-                ]
+               
+                "team_blue": {
+                    "squad_1": {
+                    "soldiers": [
+                        {
+                        "soldier_id": "1",
+                        "weapon_id": "1",
+                        "vest_id": "1",
+                        "role": "Assault",
+                        "equipment": "Radio"
+                        }
+                    ]
+                    },
+                    "squad_2": {
+                    "soldiers": [
+                        {
+                        "soldier_id": "2",
+                        "weapon_id": "2",
+                        "vest_id": "2",
+                        "role": "Sniper",
+                        "equipment": "Medical_Kit"
+                        }
+                    ]
+                    },
+                    "squad_3": {
+                    "soldiers": [
+                        {
+                        "soldier_id": "3",
+                        "weapon_id": "3",
+                        "vest_id": "3",
+                        "role": "Medic",
+                        "equipment": "Communication"
+                        }
+                    ]
+                    },
+                    "squad_4": {
+                    "soldiers": [
+                        {
+                        "soldier_id": "4",
+                        "weapon_id": "1",
+                        "vest_id": "1",
+                        "role": "Engineer",
+                        "equipment": "Miscellaneous"
+                        }
+                    ]
+                    },
+                    "squad_5": {
+                    "soldiers": [
+                        {
+                        "soldier_id": "5",
+                        "weapon_id": "2",
+                        "vest_id": "2",
+                        "role": "Assault",
+                        "equipment": "Radio"
+                        }
+                    ]
+                    },
+                    "squad_6": {
+                    "soldiers": [
+                        {
+                        "soldier_id": "6",
+                        "weapon_id": "3",
+                        "vest_id": "3",
+                        "role": "Sniper",
+                        "equipment": "Medical_Kit"
+                        }
+                    ]
+                    }
+                },
+                "team_red": {
+                    "squad_1": {
+                    "soldiers": [
+                        {
+                        "soldier_id": "7",
+                        "weapon_id": "1",
+                        "vest_id": "1",
+                        "role": "Medic",
+                        "equipment": "Communication"
+                        }
+                    ]
+                    },
+                    "squad_2": {
+                    "soldiers": [
+                        {
+                        "soldier_id": "8",
+                        "weapon_id": "2",
+                        "vest_id": "2",
+                        "role": "Engineer",
+                        "equipment": "Miscellaneous"
+                        }
+                    ]
+                    },
+                    "squad_3": {
+                    "soldiers": [
+                        {
+                        "soldier_id": "9",
+                        "weapon_id": "3",
+                        "vest_id": "3",
+                        "role": "Assault",
+                        "equipment": "Radio"
+                        }
+                    ]
+                    },
+                    "squad_4": {
+                    "soldiers": [
+                        {
+                        "soldier_id": "10",
+                        "weapon_id": "1",
+                        "vest_id": "1",
+                        "role": "Sniper",
+                        "equipment": "Medical_Kit"
+                        }
+                    ]
+                    },
+                    "squad_5": {
+                    "soldiers": [
+                        {
+                        "soldier_id": "11",
+                        "weapon_id": "2",
+                        "vest_id": "2",
+                        "role": "Medic",
+                        "equipment": "Communication"
+                        }
+                    ]
+                    },
+                    "squad_6": {
+                    "soldiers": [
+                        {
+                        "soldier_id": "12",
+                        "weapon_id": "3",
+                        "vest_id": "3",
+                        "role": "Engineer",
+                        "equipment": "Miscellaneous"
+                        }
+                    ]
+                }
+            }
+            
             }
         }
 
@@ -195,6 +314,7 @@ class KillEvent(BaseModel):
 class SessionBase(BaseModel):
     session_id: str  # Given by the client
     start_time: datetime  # Time when the session is created
+    end_time: Optional[datetime] = None  # Time when the session ends
     participated_soldiers: List[SoldierInSession]  # List of soldiers in the session
     events: Optional[List[KillEvent]] = []  # Logs of events like who killed whom, with timestamps
     team_stats_history: Optional[List[TeamStatsEvent]] = []

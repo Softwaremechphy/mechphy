@@ -479,6 +479,90 @@ async def get_start_end_time(session_id: str, db:AsyncIOMotorDatabase = Depends(
 
 
 
+
+# Return a list of all sessions with session_id, start_time, and the earliest/latest location timestamps.
+@router.get("/all_sessions", response_model=List[dict])
+async def get_all_sessions(db: AsyncIOMotorDatabase = Depends(get_db_in)):
+    """
+    Return a list of all sessions with session_id, start_time, and end_time.
+    
+    This function loops through each session and each soldier's location data to find the true earliest and latest
+    timestamps, rather than assuming the data is ordered. This is necessary because, even if you intend to store
+    location data in chronological order, there is no guarantee that the array remains sorted due to possible
+    out-of-order ingestion, manual updates, or bugs. Using min() and max() ensures correctness regardless of order.
+    """
+    sessions_cursor = db.sessions.find({}, {"_id": 0, "session_id": 1, "start_time": 1, "end_time": 1, "participated_soldiers": 1})
+    sessions = []
+    async for session in sessions_cursor:
+        # Find earliest and latest timestamps from all soldiers' location data
+        earliest_time = None
+        latest_time = None
+        for soldier in session.get("participated_soldiers", []):
+            locations = soldier.get("location", [])
+            timestamps = [loc.get("timestamp") for loc in locations if "timestamp" in loc]
+            if timestamps:
+                soldier_earliest = min(timestamps)
+                soldier_latest = max(timestamps)
+                if earliest_time is None or soldier_earliest < earliest_time:
+                    earliest_time = soldier_earliest
+                if latest_time is None or soldier_latest > latest_time:
+                    latest_time = soldier_latest
+        sessions.append({
+            "session_id": session.get("session_id"),
+            "start_time": session.get("start_time"),
+            "end_time": session.get("end_time"),
+            "earliest_location_time": earliest_time,
+            "latest_location_time": latest_time
+        })
+    return sessions
+
+
+
+from fastapi import BackgroundTasks
+
+@router.post("/{session_id}/start", status_code=200)
+async def start_realtime_monitoring(
+    session_id: str,
+    background_tasks: BackgroundTasks,
+    db: AsyncIOMotorDatabase = Depends(get_db_in)
+):
+    """
+    Start real-time monitoring for a session.
+    """
+    session = await db.sessions.find_one({"session_id": session_id})
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Start real-time services (see main.py changes below)
+    from main import start_realtime_services
+    background_tasks.add_task(start_realtime_services, session_id)
+
+    return {"detail": "Real-time monitoring started", "session_id": session_id}
+
+
+@router.put("/{session_id}/end", status_code=status.HTTP_200_OK)
+async def mark_session_end_and_stop_realtime(
+    session_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db_in)
+):
+    """
+    Mark the session as ended by storing the current timestamp as end_time,
+    and stop real-time monitoring.
+    """
+    end_time = datetime.utcnow()
+    result = await db.sessions.update_one(
+        {"session_id": session_id},
+        {"$set": {"end_time": end_time}}
+    )
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Session not found or not updated")
+
+    # Stop real-time services (see main.py changes below)
+    from main import stop_realtime_services
+    await stop_realtime_services()
+
+    return {"session_id": session_id, "end_time": end_time, "realtime_stopped": True}
+
 # Deleting a session by session_id 
 #----------------------------------------------CURRENTLY-------NOT---------WORKING---------FIX---------BUGG-----------------
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)

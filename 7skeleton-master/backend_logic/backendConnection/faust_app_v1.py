@@ -124,6 +124,7 @@ class App(faust.App):
         self.ws_service_kill_feed = KillFeedWebSocketService(self, bind=settings.WS_HOST, port=8002)
         self.ws_service_team_stats = TeamStatsWebSocketService(self, bind=settings.WS_HOST, port=8003)
         self.bullet_counts = {"team_red": 0, "team_blue": 0}  # Persistent bullet counts
+        self.should_stop_realtime = False
 
     # It overrides the default on_start method to add WebSocket services as runtime dependencies
     async def on_start(self):
@@ -416,7 +417,7 @@ async def process_soldiers(soldier_data_stream):
 # Why: It’s a background task that periodically updates stats, without blocking the rest of our app.
 # How: Because it’s async, it yields control back to the event loop during sleep, letting other tasks run.
 async def periodic_stats_update():
-    while True:
+    while not app.should_stop_realtime:
         try:
             await asyncio.sleep(5)  # Update every 5 seconds
             
