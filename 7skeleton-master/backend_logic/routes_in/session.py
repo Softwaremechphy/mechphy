@@ -518,8 +518,8 @@ async def get_all_sessions(db: AsyncIOMotorDatabase = Depends(get_db_in)):
 
 
 
-from fastapi import BackgroundTasks
 
+from fastapi import BackgroundTasks
 @router.post("/{session_id}/start", status_code=200)
 async def start_realtime_monitoring(
     session_id: str,
@@ -540,14 +540,22 @@ async def start_realtime_monitoring(
     return {"detail": "Real-time monitoring started", "session_id": session_id}
 
 
+
+# Cumulate session stats into outside monitoring stats when session ends
+# (To be added inside the /end endpoint after marking session as ended)
+# For each soldier in the session, fetch their latest session stats and
+# add (cumulate) them to their persistent stats in the outside monitoring DB.
+# This ensures that after every session, the overall stats for each soldier
+# (such as kill_count, bullets_fired, sessions_participated, etc.)
+# are updated and reflect all sessions played.
 @router.put("/{session_id}/end", status_code=status.HTTP_200_OK)
-async def mark_session_end_and_stop_realtime(
+async def mark_session_end_and_cumulate_stats(
     session_id: str,
-    db: AsyncIOMotorDatabase = Depends(get_db_in)
+    db: AsyncIOMotorDatabase = Depends(get_db_in),
+    db_out: AsyncIOMotorDatabase = Depends(get_db_out)
 ):
     """
-    Mark the session as ended by storing the current timestamp as end_time,
-    and stop real-time monitoring.
+    Mark the session as ended and cumulate session stats into outside monitoring stats.
     """
     end_time = datetime.utcnow()
     result = await db.sessions.update_one(
@@ -556,6 +564,50 @@ async def mark_session_end_and_stop_realtime(
     )
     if result.modified_count == 0:
         raise HTTPException(status_code=404, detail="Session not found or not updated")
+
+    # Fetch session data
+    session = await db.sessions.find_one({"session_id": session_id})
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Cumulate stats for each soldier
+    try:
+        for soldier in session.get("participated_soldiers", []):
+            soldier_id = soldier["soldier_id"]
+            stats_list = soldier.get("stats", [])
+            if not stats_list:
+                continue
+            latest_stat = stats_list[-1]  # Get latest stats
+
+            # Fetch outside soldier record
+            outside_soldier = await db_out[settings.SOLDIER_COLLECTION].find_one({"soldier_id": soldier_id})
+            if not outside_soldier:
+                continue
+
+            # Cumulate stats
+            outside_stats = outside_soldier.get("stats") or {}
+            outside_kills = outside_stats.get("kill_count", 0)
+            outside_sessions = outside_stats.get("sessions_participated", [])
+            outside_bullets = outside_stats.get("stats_data", {}).get("bullets_fired", 0)
+
+            # Update stats
+            new_kills = outside_kills + latest_stat.get("kill_count", 0)
+            new_bullets = outside_bullets + latest_stat.get("bullets_fired", 0)
+            new_sessions = list(set(outside_sessions + [session_id]))
+
+            new_stats = {
+                "kill_count": new_kills,
+                "sessions_participated": new_sessions,
+                "stats_data": {"bullets_fired": new_bullets}
+            }
+
+            await db_out[settings.SOLDIER_COLLECTION].update_one(
+                {"soldier_id": soldier_id},
+                {"$set": {"stats": new_stats}}
+            )
+    except Exception as e:
+        print(f"Error cumulating stats for session {session_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error cumulating stats: {e}")
 
     # Stop real-time services (see main.py changes below)
     from main import stop_realtime_services
@@ -593,6 +645,23 @@ async def get_team_squad_soldiers(
             result[team][squad] = []
         result[team][squad].append(entry)
     return result
+
+
+
+@router.get("/{session_id}/latest_team_stats", response_model=dict)
+async def get_latest_team_stats(
+    session_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db_in)
+):
+    """
+    Fetch the latest team stats for a session from team_stats_history.
+    """
+    session = await db.sessions.find_one({"session_id": session_id}, {"_id": 0, "team_stats_history": 1})
+    if not session or "team_stats_history" not in session or not session["team_stats_history"]:
+        raise HTTPException(status_code=404, detail="No team stats found for this session")
+
+    latest_stats = session["team_stats_history"][-1]  # Get the last entry (latest)
+    return {"latest_team_stats": latest_stats}
 
 
 # Deleting a session by session_id 
