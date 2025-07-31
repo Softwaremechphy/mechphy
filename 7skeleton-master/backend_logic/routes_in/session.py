@@ -563,6 +563,38 @@ async def mark_session_end_and_stop_realtime(
 
     return {"session_id": session_id, "end_time": end_time, "realtime_stopped": True}
 
+
+
+@router.get("/{session_id}/team_squad_soldiers", response_model=dict)
+async def get_team_squad_soldiers(
+    session_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db_in)
+):
+    """
+    Returns team-wise and squad-wise soldiers for a session,
+    including soldier_id, session_soldier_id, and call_sign.
+    """
+    session = await db.sessions.find_one({"session_id": session_id}, {"_id": 0, "participated_soldiers": 1})
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    result = {"team_red": {}, "team_blue": {}}
+    for soldier in session.get("participated_soldiers", []):
+        team = f"team_{soldier.get('team', '').lower()}"
+        squad = f"squad_{soldier.get('squad')}"
+        entry = {
+            "soldier_id": soldier.get("soldier_id"),
+            "session_soldier_id": soldier.get("session_soldier_id"),
+            "call_sign": soldier.get("call_sign"),
+        }
+        if team not in result:
+            result[team] = {}
+        if squad not in result[team]:
+            result[team][squad] = []
+        result[team][squad].append(entry)
+    return result
+
+
 # Deleting a session by session_id 
 #----------------------------------------------CURRENTLY-------NOT---------WORKING---------FIX---------BUGG-----------------
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)

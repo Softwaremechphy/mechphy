@@ -99,33 +99,150 @@ class ResourceAllocation(BaseModel):
     class Config:
         schema_extra = {
             "example": {
+               
                 "team_blue": {
                     "squad_1": {
-                        "soldiers": [
-                            {"soldier_id": "S123", "weapon_id": "W1", "vest_id": "V2"},
-                            {"soldier_id": "S124", "weapon_id": "W2", "vest_id": "V1"}
-                        ]
+                    "soldiers": [
+                        {
+                        "soldier_id": "1",
+                        "weapon_id": "1",
+                        "vest_id": "1",
+                        "role": "Assault",
+                        "equipment": "Radio"
+                        }
+                    ]
                     },
                     "squad_2": {
-                        "soldiers": [
-                            {"soldier_id": "S125", "weapon_id": "W3", "vest_id": "V3"}
-                        ]
+                    "soldiers": [
+                        {
+                        "soldier_id": "2",
+                        "weapon_id": "2",
+                        "vest_id": "2",
+                        "role": "Sniper",
+                        "equipment": "Medical_Kit"
+                        }
+                    ]
                     },
-                    # Additional squads go here
+                    "squad_3": {
+                    "soldiers": [
+                        {
+                        "soldier_id": "3",
+                        "weapon_id": "3",
+                        "vest_id": "3",
+                        "role": "Medic",
+                        "equipment": "Communication"
+                        }
+                    ]
+                    },
+                    "squad_4": {
+                    "soldiers": [
+                        {
+                        "soldier_id": "4",
+                        "weapon_id": "1",
+                        "vest_id": "1",
+                        "role": "Engineer",
+                        "equipment": "Miscellaneous"
+                        }
+                    ]
+                    },
+                    "squad_5": {
+                    "soldiers": [
+                        {
+                        "soldier_id": "5",
+                        "weapon_id": "2",
+                        "vest_id": "2",
+                        "role": "Assault",
+                        "equipment": "Radio"
+                        }
+                    ]
+                    },
+                    "squad_6": {
+                    "soldiers": [
+                        {
+                        "soldier_id": "6",
+                        "weapon_id": "3",
+                        "vest_id": "3",
+                        "role": "Sniper",
+                        "equipment": "Medical_Kit"
+                        }
+                    ]
+                    }
                 },
                 "team_red": {
                     "squad_1": {
-                        "soldiers": [
-                            {"soldier_id": "S126", "weapon_id": "W4", "vest_id": "V4"}
-                        ]
+                    "soldiers": [
+                        {
+                        "soldier_id": "7",
+                        "weapon_id": "1",
+                        "vest_id": "1",
+                        "role": "Medic",
+                        "equipment": "Communication"
+                        }
+                    ]
                     },
-                    # Additional squads go here
+                    "squad_2": {
+                    "soldiers": [
+                        {
+                        "soldier_id": "8",
+                        "weapon_id": "2",
+                        "vest_id": "2",
+                        "role": "Engineer",
+                        "equipment": "Miscellaneous"
+                        }
+                    ]
+                    },
+                    "squad_3": {
+                    "soldiers": [
+                        {
+                        "soldier_id": "9",
+                        "weapon_id": "3",
+                        "vest_id": "3",
+                        "role": "Assault",
+                        "equipment": "Radio"
+                        }
+                    ]
+                    },
+                    "squad_4": {
+                    "soldiers": [
+                        {
+                        "soldier_id": "10",
+                        "weapon_id": "1",
+                        "vest_id": "1",
+                        "role": "Sniper",
+                        "equipment": "Medical_Kit"
+                        }
+                    ]
+                    },
+                    "squad_5": {
+                    "soldiers": [
+                        {
+                        "soldier_id": "11",
+                        "weapon_id": "2",
+                        "vest_id": "2",
+                        "role": "Medic",
+                        "equipment": "Communication"
+                        }
+                    ]
+                    },
+                    "squad_6": {
+                    "soldiers": [
+                        {
+                        "soldier_id": "12",
+                        "weapon_id": "3",
+                        "vest_id": "3",
+                        "role": "Engineer",
+                        "equipment": "Miscellaneous"
+                        }
+                    ]
                 }
+            }
+            
             }
         }
 
 # Model for soldier stats during a session
 class SoldierInSession(BaseModel):
+    session_soldier_id: int
     soldier_id: str
     call_sign: str
     weapon_id: str
