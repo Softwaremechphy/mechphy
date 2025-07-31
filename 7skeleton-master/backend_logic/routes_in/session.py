@@ -519,25 +519,48 @@ async def get_all_sessions(db: AsyncIOMotorDatabase = Depends(get_db_in)):
 
 
 
+
 from fastapi import BackgroundTasks
-@router.post("/{session_id}/start", status_code=200)
+@router.post("/start", status_code=200)
 async def start_realtime_monitoring(
-    session_id: str,
     background_tasks: BackgroundTasks,
     db: AsyncIOMotorDatabase = Depends(get_db_in)
 ):
     """
-    Start real-time monitoring for a session.
+    Start real-time monitoring for the latest session (by start_time).
     """
-    session = await db.sessions.find_one({"session_id": session_id})
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+    # Fetch the latest session by start_time
+    latest_session = await db.sessions.find_one(sort=[("start_time", -1)])
+    if not latest_session:
+        raise HTTPException(status_code=404, detail="No session found")
+
+    session_id = latest_session["session_id"]
 
     # Start real-time services (see main.py changes below)
     from main import start_realtime_services
     background_tasks.add_task(start_realtime_services, session_id)
 
     return {"detail": "Real-time monitoring started", "session_id": session_id}
+
+
+# @router.post("/{session_id}/start", status_code=200)
+# async def start_realtime_monitoring(
+#     session_id: str,
+#     background_tasks: BackgroundTasks,
+#     db: AsyncIOMotorDatabase = Depends(get_db_in)
+# ):
+#     """
+#     Start real-time monitoring for a session.
+#     """
+#     session = await db.sessions.find_one({"session_id": session_id})
+#     if not session:
+#         raise HTTPException(status_code=404, detail="Session not found")
+
+#     # Start real-time services (see main.py changes below)
+#     from main import start_realtime_services
+#     background_tasks.add_task(start_realtime_services, session_id)
+
+#     return {"detail": "Real-time monitoring started", "session_id": session_id}
 
 
 
@@ -665,23 +688,27 @@ async def get_latest_team_stats(
 
 
 # Deleting a session by session_id 
-#----------------------------------------------CURRENTLY-------NOT---------WORKING---------FIX---------BUGG-----------------
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_session(session_id: str, db: AsyncIOMotorDatabase = Depends(get_db_in)):
-    
-    # Debugging - Print or log the session_id received
+async def delete_session(
+    session_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db_in)
+):
+    """
+    Delete a session and all its embedded data by session_id.
+    """
+    # Debug: Print the session_id being deleted
     print(f"Deleting session with ID: {session_id}")
-    
+
     # Check if the session exists
     session = await db.sessions.find_one({"session_id": session_id})
     if session is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
-    # Delete the session from the database
-    delete_result = await db[settings.DB_in].sessions.delete_one({"session_id": session_id})
+    # Delete the session document (removes everything inside it)
+    delete_result = await db.sessions.delete_one({"session_id": session_id})
 
     if delete_result.deleted_count == 0:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
-    # Return success message or no content (204)
+    # Success: No content to return
     return {"detail": "Session deleted successfully"}
