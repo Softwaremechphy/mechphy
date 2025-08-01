@@ -23,7 +23,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import utils
 
 # FastAPI app and MongoDB client initialization
-app = FastAPI()
+fastapi_app = FastAPI()
 client = AsyncIOMotorClient(settings.MONGODB_URI)
 db_in = client[settings.DB_in]
 
@@ -124,6 +124,7 @@ class App(faust.App):
         self.ws_service_kill_feed = KillFeedWebSocketService(self, bind=settings.WS_HOST, port=8002)
         self.ws_service_team_stats = TeamStatsWebSocketService(self, bind=settings.WS_HOST, port=8003)
         self.bullet_counts = {"team_red": 0, "team_blue": 0}  # Persistent bullet counts
+        self.should_stop_realtime = False
 
     # It overrides the default on_start method to add WebSocket services as runtime dependencies
     async def on_start(self):
@@ -147,6 +148,7 @@ soldier_topic = app.topic(settings.KAFKA_TOPIC, value_type=Soldier, partitions=1
 
 # Calculate and broadcast team statistics to WebSocket clients and store in DB
 async def calculate_and_broadcast_team_stats(session_id):
+    logger.info(f"calculate_and_broadcast_team_stats called for session {session_id}")
     try:
         # Fetch the latest session by session_id
         latest_session = await db_in["sessions"].find_one({"_id": session_id})
@@ -230,7 +232,7 @@ async def calculate_and_broadcast_team_stats(session_id):
 @app.agent(soldier_topic)
 async def process_soldiers(soldier_data_stream):
     # Start periodic stats update in the background
-    asyncio.create_task(periodic_stats_update())
+    # asyncio.create_task(periodic_stats_update())  (Removed)
     
     async for soldier_data in soldier_data_stream:
         try:
@@ -246,13 +248,19 @@ async def process_soldiers(soldier_data_stream):
                 sort=[("start_time", -1)]
             )
             
-            # Update bullet counts for the soldier's team
+            if not latest_session:
+                logger.error("No active session found")
+                continue  # Use continue if inside async for loop, return if inside a function
+
+            
             soldier_info = next(
                 (s for s in latest_session["participated_soldiers"] 
                  if s["soldier_id"] == str(transformed_data['soldier_id'])),
                 None
             )
             
+            
+            # Update bullet counts for the soldier's team
             if soldier_info:
                 team = soldier_info.get("team", "").lower()
                 if team in ["red", "blue"]:
@@ -348,57 +356,43 @@ async def process_soldiers(soldier_data_stream):
 
                     # Store kill event in session document
                     update_result = await db_in["sessions"].update_one(
+                    {"_id": latest_session["_id"]},
+                    {"$push": {"events": kill_event}}
+                )
+                if update_result.modified_count != 1:
+                    logger.error("Failed to store kill event in session")
+
+                # Broadcast kill feed event
+                kill_feed_message_json = json.dumps(kill_event)
+                for websocket in app.ws_service_kill_feed.connections:
+                    await websocket.send(kill_feed_message_json)
+
+                # Update attacker's stats in the session document
+                attacker_index = next(
+                    (index for (index, soldier) in enumerate(latest_session["participated_soldiers"])
+                    if soldier["soldier_id"] == str(attacker_id_clean)),
+                    None
+                )
+                if attacker_index is not None:
+                    current_stats = latest_session["participated_soldiers"][attacker_index].get("stats", [])
+                    current_kills = current_stats[-1].get("kill_count", 0) if current_stats else 0
+
+                    new_stat = {
+                        "kill_count": current_kills + 1,
+                        "bullets_fired": transformed_data.get("bullet_count", 0),
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                    update_result = await db_in["sessions"].update_one(
                         {"_id": latest_session["_id"]},
-                        {
-                            "$push": {
-                                "events": kill_event
-                            }
-                        }
+                        {"$push": {f"participated_soldiers.{attacker_index}.stats": new_stat}}
                     )
-
                     if update_result.modified_count != 1:
-                        logger.error("Failed to store kill event in session")
+                        logger.error(f"Failed to update stats for attacker {attacker_id}")
+                else:
+                    logger.error(f"Attacker index not found for attacker_id {attacker_id}")
 
-                    # Broadcast kill feed event to all connected WebSocket clients
-                    kill_feed_message_json = json.dumps(kill_event)
-                    for websocket in app.ws_service_kill_feed.connections:
-                        await websocket.send(kill_feed_message_json)
-
-                    # Update attacker's stats in the session document
-                    try:
-                        attacker_index = next(
-                            (index for (index, soldier) in enumerate(latest_session["participated_soldiers"])
-                            if soldier["soldier_id"] == str(attacker_id)),
-                            None
-                        )
-
-                        if attacker_index is not None:
-                            current_stats = latest_session["participated_soldiers"][attacker_index].get("stats", [])
-                            current_kills = current_stats[-1].get("kill_count", 0) if current_stats else 0
-
-                            new_stat = {
-                                "kill_count": current_kills + 1,
-                                "bullets_fired": transformed_data.get("bullet_count", 0),
-                                "timestamp": datetime.utcnow().isoformat()
-                            }
-
-                            update_result = await db_in["sessions"].update_one(
-                                {"_id": latest_session["_id"]},
-                                {
-                                    "$push": {
-                                        f"participated_soldiers.{attacker_index}.stats": new_stat
-                                    }
-                                }
-                            )
-
-                            if update_result.modified_count != 1:
-                                logger.error(f"Failed to update stats for attacker {attacker_id}")
-                                
-                            # Calculate and broadcast team stats after a kill
-                            await calculate_and_broadcast_team_stats(latest_session["_id"])
-
-                    except Exception as e:
-                        logger.error(f"Error updating attacker stats: {e}", exc_info=True)
+                # <--- THIS IS CRUCIAL: Always call this after a kill event!
+                await calculate_and_broadcast_team_stats(latest_session["_id"])
 
             logger.info(f"Processed soldier data: {transformed_data}")
 
@@ -406,67 +400,70 @@ async def process_soldiers(soldier_data_stream):
             logger.error(f"Error processing soldier data: {e}", exc_info=True)
 
 
+
 # What: This is an infinite loop that runs forever, but pauses for 5 seconds each time using await asyncio.sleep(5).
 # Why: It’s a background task that periodically updates stats, without blocking the rest of our app.
 # How: Because it’s async, it yields control back to the event loop during sleep, letting other tasks run.
-async def periodic_stats_update():
-    while True:
-        try:
-            await asyncio.sleep(5)  # Update every 5 seconds
+# async def periodic_stats_update():
+#     while not app.should_stop_realtime:
+#         try:
+#             await asyncio.sleep(5)  # Update every 5 seconds
             
-            # Fetch the latest session from DB
-            latest_session = await db_in["sessions"].find_one(
-                sort=[("start_time", -1)]
-            )
+#             # Fetch the latest session from DB
+#             latest_session = await db_in["sessions"].find_one(
+#                 sort=[("start_time", -1)]
+#             )
 
-            if not latest_session:
-                logger.error("No active session found for periodic update")
-                continue
+#             if not latest_session:
+#                 logger.error("No active session found for periodic update")
+#                 continue
 
-            # For each soldier, push a new stats entry with current values
-            for soldier_index, soldier in enumerate(latest_session["participated_soldiers"]):
-                try:
-                    # Get current stats and last stat entry
-                    # This uses a conditional expression: A if condition else B.
-                    current_stats = soldier.get("stats", [])
-                    last_stat = current_stats[-1] if current_stats else {"kill_count": 0, "bullets_fired": 0}
+#             # For each soldier, push a new stats entry with current values
+#             for soldier_index, soldier in enumerate(latest_session["participated_soldiers"]):
+#                 try:
+#                     # Get current stats and last stat entry
+#                     # This uses a conditional expression: A if condition else B.
+#                     current_stats = soldier.get("stats", [])
+#                     last_stat = current_stats[-1] if current_stats else {"kill_count": 0, "bullets_fired": 0}
                     
-                    # Get team for bullet count (not used here, but could be extended)
-                    team = soldier.get("team", "").lower()
-                    team_key = f"team_{team}" if team in ["red", "blue"] else None
+#                     # Get team for bullet count (not used here, but could be extended)
+#                     team = soldier.get("team", "").lower()
+#                     team_key = f"team_{team}" if team in ["red", "blue"] else None
                     
-                    # Create new stat entry with current values and timestamp
-                    new_stat = {
-                        "kill_count": last_stat.get("kill_count", 0),
-                        "bullets_fired": last_stat.get("bullets_fired", 0),
-                        "timestamp": datetime.utcnow().isoformat()
-                    }
+#                     # Create new stat entry with current values and timestamp
+#                     new_stat = {
+#                         "kill_count": last_stat.get("kill_count", 0),
+#                         "bullets_fired": last_stat.get("bullets_fired", 0),
+#                         "timestamp": datetime.utcnow().isoformat()
+#                     }
 
-                    # Push new stat entry to the soldier's stats array in DB
-                    update_result = await db_in["sessions"].update_one(
-                        {"_id": latest_session["_id"]},
-                        {
-                            "$push": {
-                                f"participated_soldiers.{soldier_index}.stats": new_stat
-                            }
-                        }
-                    )
+#                     # Push new stat entry to the soldier's stats array in DB
+#                     update_result = await db_in["sessions"].update_one(
+#                         {"_id": latest_session["_id"]},
+#                         {
+#                             "$push": {
+#                                 f"participated_soldiers.{soldier_index}.stats": new_stat
+#                             }
+#                         }
+#                     )
 
-                    if update_result.modified_count != 1:
-                        logger.error(f"Failed to update stats for soldier {soldier.get('soldier_id')}")
+#                     if update_result.modified_count != 1:
+#                         logger.error(f"Failed to update stats for soldier {soldier.get('soldier_id')}")
 
-                except Exception as e:
-                    logger.error(f"Error updating stats for soldier {soldier.get('soldier_id')}: {e}", exc_info=True)
+#                 except Exception as e:
+#                     logger.error(f"Error updating stats for soldier {soldier.get('soldier_id')}: {e}", exc_info=True)
 
-            # After updating all stats, calculate and broadcast team stats
-            await calculate_and_broadcast_team_stats(latest_session["_id"])
+#             # After updating all stats, calculate and broadcast team stats
+#             await calculate_and_broadcast_team_stats(latest_session["_id"])
 
-            # Log successful update
-            logger.info("Periodic stats update completed successfully")
+#             # Log successful update
+#             logger.info("Periodic stats update completed successfully")
 
-        except Exception as e:
-            logger.error(f"Error in periodic stats update: {e}", exc_info=True)
-            await asyncio.sleep(1)  # Short sleep on error before retrying
+#         except Exception as e:
+#             logger.error(f"Error in periodic stats update: {e}", exc_info=True)
+#             await asyncio.sleep(1)  # Short sleep on error before retrying
+
+
 
 # Entry point for running the Faust app
 if __name__ == "__main__":

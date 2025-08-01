@@ -106,7 +106,7 @@ async def get_soldier_data_from_db(soldier_id: int):
         return None
 
 
-async def get_soldier_data_from_latest_session(soldier_id: int):
+async def get_soldier_data_from_latest_session(soldier_id: str):
     
     # Convert soldier_id to string explicitly
     soldier_id_str = str(soldier_id).strip()  

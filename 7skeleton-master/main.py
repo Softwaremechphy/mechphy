@@ -121,6 +121,7 @@ from backend_logic.backendConnection.replay_app import create_replay_app
 import uvicorn
 from fastapi import FastAPI
 import logging
+import subprocess
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -128,6 +129,47 @@ logger = logging.getLogger(__name__)
 
 # Global variable to store the replay app instance
 replay_app = None
+
+
+realtime_state = {
+    "faust_process": None,
+    "send_task": None,
+}
+
+async def start_realtime_services(session_id):
+    """Start Faust worker and serial ingestion."""
+    if realtime_state["faust_process"] is None:
+        # Start Faust worker
+        realtime_state["faust_process"] = await run_faust("faust", "backend_logic.backendConnection.faust_app_v1")
+    if realtime_state["send_task"] is None:
+        # Start serial ingestion and Kafka sender
+        realtime_state["send_task"] = asyncio.create_task(send_to_kafka())
+    logger.info("Real-time services started.")
+
+async def stop_realtime_services():
+    """Stop Faust worker and serial ingestion."""
+    # Stop serial ingestion
+    send_task = realtime_state.get("send_task")
+    if send_task:
+        send_task.cancel()
+        try:
+            await send_task
+        except asyncio.CancelledError:
+            pass
+        realtime_state["send_task"] = None
+
+    # Stop Faust worker
+    faust_process = realtime_state.get("faust_process")
+    if faust_process:
+        faust_process.terminate()
+        await faust_process.wait()
+        realtime_state["faust_process"] = None
+
+    # Set the flag to stop loops
+    from backend_logic.backendConnection.faust_app_v1 import app
+    app.should_stop_realtime = True
+
+    logger.info("Real-time services stopped.")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
