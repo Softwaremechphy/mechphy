@@ -3,8 +3,8 @@
 import faust
 import json
 import asyncio
-import websockets
 from mode import Service
+from websockets.server import WebSocketServerProtocol
 from websockets.exceptions import ConnectionClosed
 from db.schemas.incoming_soldier import Soldier
 from db.data_transformer import transform_soldier_data
@@ -23,144 +23,116 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import utils
 
 # FastAPI app and MongoDB client initialization
-app = FastAPI()
+fastapi_app = FastAPI()
 client = AsyncIOMotorClient(settings.MONGODB_URI)
 db_in = client[settings.DB_in]
 
-# Robust WebSocket service class
-class WebSocketService(Service):
-    def __init__(self, app, port: int, name: str):
+# WebSocket service for raw soldier data (port 8001)
+class RawDataWebSocketService(Service):
+    def __init__(self, app, bind: str = settings.WS_HOST, port: int = settings.WS_PORT, **kwargs):
+        # Store app, bind address, port, and active connections
         self.app = app
+        self.bind = bind
         self.port = port
-        self.name = name
-        self.host = settings.WS_HOST
-        self.connections = set()  # Changed from list to set
-        self.server = None
-        super().__init__()
-        logger.info(f"Initialized {name} WebSocket service on port {port}")
+        self.connections = []
+        super().__init__(**kwargs)
 
-    async def on_started(self) -> None:
-        """Start the WebSocket server when service starts"""
+    async def on_messages(self, websocket, path):
+        # Add new websocket connection and listen for messages
+        self.connections.append(websocket)
         try:
-            self.server = await websockets.serve(
-                self.handle_connection,
-                self.host,
-                self.port
-            )
-            logger.info(f"Started {self.name} WebSocket server on {self.host}:{self.port}")
-        except Exception as e:
-            logger.error(f"Failed to start {self.name} WebSocket server: {str(e)}")
-            raise
+            async for message in websocket:
+                await self.on_message(websocket, message)
+        except ConnectionClosed:
+            self.connections.remove(websocket)
 
-    async def on_stop(self) -> None:
-        """Clean shutdown of WebSocket server and connections"""
+    async def on_message(self, websocket, message):
+        # Echo received message back to client
+        await websocket.send(f"Received: {message}")
+
+    @Service.task
+    async def _background_server(self):
+        # Start the WebSocket server
+        import websockets
+        await websockets.serve(self.on_messages, self.bind, self.port)
+
+# WebSocket service for kill feed data (port 8002)
+class KillFeedWebSocketService(Service):
+    def __init__(self, app, bind: str = settings.WS_HOST, port: int = settings.KILL_FEED_WS_PORT, **kwargs):
+        # Store app, bind address, port, and active connections
+        self.app = app
+        self.bind = bind
+        self.port = port
+        self.connections = []
+        super().__init__(**kwargs)
+
+    async def on_messages(self, websocket, path):
+        # Add new websocket connection and listen for messages
+        self.connections.append(websocket)
         try:
-            if hasattr(self, 'server') and self.server:
-                self.server.close()
-                await self.server.wait_closed()
-            
-            # Close all active connections
-            close_tasks = [ws.close() for ws in self.connections]
-            if close_tasks:
-                await asyncio.gather(*close_tasks, return_exceptions=True)
-            
-            self.connections.clear()
-            logger.info(f"Stopped {self.name} WebSocket server")
-        except Exception as e:
-            logger.error(f"Error stopping {self.name} WebSocket server: {str(e)}")
+            async for message in websocket:
+                await self.on_message(websocket, message)
+        except ConnectionClosed:
+            self.connections.remove(websocket)
 
-    async def handle_connection(self, websocket, path):
-        """Handle individual WebSocket connections"""
+    async def on_message(self, websocket, message):
+        # Echo received message back to client
+        await websocket.send(f"Received: {message}")
+
+    @Service.task
+    async def _background_server(self):
+        # Start the WebSocket server
+        import websockets
+        await websockets.serve(self.on_messages, self.bind, self.port)
+
+# WebSocket service for team stats data (port 8003)
+class TeamStatsWebSocketService(Service):
+    def __init__(self, app, bind: str = settings.WS_HOST, port: int = 8003, **kwargs):
+        # Store app, bind address, port, and active connections
+        self.app = app
+        self.bind = bind
+        self.port = port
+        self.connections = []
+        super().__init__(**kwargs)
+
+    async def on_messages(self, websocket, path):
+        # Add new websocket connection and listen for messages
+        self.connections.append(websocket)
         try:
-            if path != '/ws':
-                logger.warning(f"Unexpected connection path: {path}")
-                await websocket.close(code=1003, reason="Invalid path")
-                return
+            async for message in websocket:
+                await self.on_message(websocket, message)
+        except ConnectionClosed:
+            self.connections.remove(websocket)
 
-            self.connections.add(websocket)
-            logger.info(f"New connection to {self.name} WebSocket from {websocket.remote_address}")
-            
-            try:
-                # Send connection confirmation
-                await websocket.send(json.dumps({
-                    "type": "connection",
-                    "status": "connected",
-                    "service": self.name
-                }))
-                
-                # Listen for incoming messages
-                async for message in websocket:
-                    logger.debug(f"Received message on {self.name} WebSocket: {message}")
-                    # Echo back the message (keeping original behavior)
-                    await websocket.send(f"Received: {message}")
-                    
-            except websockets.exceptions.ConnectionClosed:
-                logger.info(f"Connection closed for {self.name} WebSocket")
-            finally:
-                self.connections.discard(websocket)  # Use discard instead of remove
-                
-        except Exception as e:
-            logger.error(f"Error in {self.name} WebSocket connection handler: {str(e)}")
+    async def on_message(self, websocket, message):
+        # Echo received message back to client
+        await websocket.send(f"Received: {message}")
 
-    async def broadcast(self, message: dict):
-        """Robust broadcast method that handles dead connections"""
-        if not self.connections:
-            logger.debug(f"No active connections for {self.name} WebSocket")
-            return
-
-        disconnected = set()
-        
-        try:
-            message_str = json.dumps(message) if isinstance(message, dict) else str(message)
-            broadcast_tasks = []
-            
-            for websocket in self.connections.copy():  # Use copy to avoid modification during iteration
-                try:
-                    task = asyncio.create_task(websocket.send(message_str))
-                    broadcast_tasks.append(task)
-                except websockets.exceptions.ConnectionClosed:
-                    disconnected.add(websocket)
-                except Exception as e:
-                    logger.error(f"Error preparing broadcast to {self.name} WebSocket: {str(e)}")
-                    disconnected.add(websocket)
-            
-            if broadcast_tasks:
-                results = await asyncio.gather(*broadcast_tasks, return_exceptions=True)
-                
-                # Check for failed sends and mark connections as disconnected
-                for i, result in enumerate(results):
-                    if isinstance(result, Exception):
-                        websocket = list(self.connections)[i] if i < len(self.connections) else None
-                        if websocket:
-                            disconnected.add(websocket)
-            
-            # Remove disconnected connections
-            self.connections.difference_update(disconnected)
-            
-            logger.debug(f"Broadcasted message to {len(self.connections)} {self.name} WebSocket connections")
-            
-        except Exception as e:
-            logger.error(f"Unexpected error in {self.name} WebSocket broadcast: {str(e)}")
+    @Service.task
+    async def _background_server(self):
+        # Start the WebSocket server
+        import websockets
+        await websockets.serve(self.on_messages, self.bind, self.port)
 
 
 # Custom Faust App with WebSocket services and bullet counts
 class App(faust.App):
+    # Its overrides the default FastApi app to include WebSocket services
     def on_init(self):
-        """Initialize WebSocket services and bullet counts"""
-        # Create robust WebSocket services
-        self.ws_service_raw = WebSocketService(self, port=8001, name="raw_data")
-        self.ws_service_kill_feed = WebSocketService(self, port=8002, name="kill_feed")
-        self.ws_service_team_stats = WebSocketService(self, port=8003, name="team_stats")
-        
-        # Persistent bullet counts
-        self.bullet_counts = {"team_red": 0, "team_blue": 0}
+        # Initialize WebSocket services and bullet counts
+        self.ws_service_raw = RawDataWebSocketService(self, bind=settings.WS_HOST, port=8001)
+        self.ws_service_kill_feed = KillFeedWebSocketService(self, bind=settings.WS_HOST, port=8002)
+        self.ws_service_team_stats = TeamStatsWebSocketService(self, bind=settings.WS_HOST, port=8003)
+        self.bullet_counts = {"team_red": 0, "team_blue": 0}  # Persistent bullet counts
         self.should_stop_realtime = False
 
+    # It overrides the default on_start method to add WebSocket services as runtime dependencies
     async def on_start(self):
-        """Add WebSocket services as runtime dependencies"""
+        # Add WebSocket services as runtime dependencies
         await self.add_runtime_dependency(self.ws_service_raw)
         await self.add_runtime_dependency(self.ws_service_kill_feed)
         await self.add_runtime_dependency(self.ws_service_team_stats)
+
 
 
 # Define the Faust app (overrides FastAPI app above)
@@ -176,6 +148,7 @@ soldier_topic = app.topic(settings.KAFKA_TOPIC, value_type=Soldier, partitions=1
 
 # Calculate and broadcast team statistics to WebSocket clients and store in DB
 async def calculate_and_broadcast_team_stats(session_id):
+    logger.info(f"calculate_and_broadcast_team_stats called for session {session_id}")
     try:
         # Fetch the latest session by session_id
         latest_session = await db_in["sessions"].find_one({"_id": session_id})
@@ -243,8 +216,10 @@ async def calculate_and_broadcast_team_stats(session_id):
             }
         }
 
-        # Broadcast team stats using robust broadcast method
-        await app.ws_service_team_stats.broadcast(websocket_message)
+        # Broadcast team stats through WebSocket to all connected clients
+        team_stats_message = json.dumps(websocket_message)
+        for websocket in app.ws_service_team_stats.connections:
+            await websocket.send(team_stats_message)
 
         logger.info(f"Team stats updated and broadcasted for session {session_id}")
 
@@ -252,11 +227,12 @@ async def calculate_and_broadcast_team_stats(session_id):
         logger.error(f"Error calculating team stats: {e}", exc_info=True)
 
 
+
 # Faust agent to process incoming soldier data from Kafka
 @app.agent(soldier_topic)
 async def process_soldiers(soldier_data_stream):
     # Start periodic stats update in the background
-    # asyncio.create_task(periodic_stats_update())
+    # asyncio.create_task(periodic_stats_update())  (Removed)
     
     async for soldier_data in soldier_data_stream:
         try:
@@ -272,13 +248,19 @@ async def process_soldiers(soldier_data_stream):
                 sort=[("start_time", -1)]
             )
             
-            # Update bullet counts for the soldier's team
+            if not latest_session:
+                logger.error("No active session found")
+                continue  # Use continue if inside async for loop, return if inside a function
+
+            
             soldier_info = next(
                 (s for s in latest_session["participated_soldiers"] 
                  if s["soldier_id"] == str(transformed_data['soldier_id'])),
                 None
             )
             
+            
+            # Update bullet counts for the soldier's team
             if soldier_info:
                 team = soldier_info.get("team", "").lower()
                 if team in ["red", "blue"]:
@@ -315,8 +297,10 @@ async def process_soldiers(soldier_data_stream):
                 }
             )
 
-            # Broadcast raw soldier data using robust broadcast method
-            await app.ws_service_raw.broadcast(transformed_data)
+            # Broadcast raw soldier data to all connected WebSocket clients
+            raw_message = json.dumps(transformed_data)
+            for websocket in app.ws_service_raw.connections:
+                await websocket.send(raw_message)
 
             # Process damage and kill feed logic if hit_status is 1 or 2
             if transformed_data['hit_status'] in [1, 2]:
@@ -372,55 +356,43 @@ async def process_soldiers(soldier_data_stream):
 
                     # Store kill event in session document
                     update_result = await db_in["sessions"].update_one(
+                    {"_id": latest_session["_id"]},
+                    {"$push": {"events": kill_event}}
+                )
+                if update_result.modified_count != 1:
+                    logger.error("Failed to store kill event in session")
+
+                # Broadcast kill feed event
+                kill_feed_message_json = json.dumps(kill_event)
+                for websocket in app.ws_service_kill_feed.connections:
+                    await websocket.send(kill_feed_message_json)
+
+                # Update attacker's stats in the session document
+                attacker_index = next(
+                    (index for (index, soldier) in enumerate(latest_session["participated_soldiers"])
+                    if soldier["soldier_id"] == str(attacker_id_clean)),
+                    None
+                )
+                if attacker_index is not None:
+                    current_stats = latest_session["participated_soldiers"][attacker_index].get("stats", [])
+                    current_kills = current_stats[-1].get("kill_count", 0) if current_stats else 0
+
+                    new_stat = {
+                        "kill_count": current_kills + 1,
+                        "bullets_fired": transformed_data.get("bullet_count", 0),
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                    update_result = await db_in["sessions"].update_one(
                         {"_id": latest_session["_id"]},
-                        {
-                            "$push": {
-                                "events": kill_event
-                            }
-                        }
+                        {"$push": {f"participated_soldiers.{attacker_index}.stats": new_stat}}
                     )
-
                     if update_result.modified_count != 1:
-                        logger.error("Failed to store kill event in session")
+                        logger.error(f"Failed to update stats for attacker {attacker_id}")
+                else:
+                    logger.error(f"Attacker index not found for attacker_id {attacker_id}")
 
-                    # Broadcast kill feed event using robust broadcast method
-                    await app.ws_service_kill_feed.broadcast(kill_event)
-
-                    # Update attacker's stats in the session document
-                    try:
-                        attacker_index = next(
-                            (index for (index, soldier) in enumerate(latest_session["participated_soldiers"])
-                            if soldier["soldier_id"] == str(attacker_id)),
-                            None
-                        )
-
-                        if attacker_index is not None:
-                            current_stats = latest_session["participated_soldiers"][attacker_index].get("stats", [])
-                            current_kills = current_stats[-1].get("kill_count", 0) if current_stats else 0
-
-                            new_stat = {
-                                "kill_count": current_kills + 1,
-                                "bullets_fired": transformed_data.get("bullet_count", 0),
-                                "timestamp": datetime.utcnow().isoformat()
-                            }
-
-                            update_result = await db_in["sessions"].update_one(
-                                {"_id": latest_session["_id"]},
-                                {
-                                    "$push": {
-                                        f"participated_soldiers.{attacker_index}.stats": new_stat
-                                    }
-                                }
-                            )
-
-                            if update_result.modified_count != 1:
-                                logger.error(f"Failed to update stats for attacker {attacker_id}")
-                                
-                            # Calculate and broadcast team stats after a kill
-                            await calculate_and_broadcast_team_stats(latest_session["_id"])
-
-                    except Exception as e:
-                        logger.error(f"Error updating attacker stats: {e}", exc_info=True)
+                # <--- THIS IS CRUCIAL: Always call this after a kill event!
+                await calculate_and_broadcast_team_stats(latest_session["_id"])
 
             logger.info(f"Processed soldier data: {transformed_data}")
 
@@ -428,10 +400,12 @@ async def process_soldiers(soldier_data_stream):
             logger.error(f"Error processing soldier data: {e}", exc_info=True)
 
 
-# Periodic stats update function with improved error handling
+
+# What: This is an infinite loop that runs forever, but pauses for 5 seconds each time using await asyncio.sleep(5).
+# Why: It’s a background task that periodically updates stats, without blocking the rest of our app.
+# How: Because it’s async, it yields control back to the event loop during sleep, letting other tasks run.
 # async def periodic_stats_update():
-#     """Background task that periodically updates stats every 5 seconds"""
-#     while True:
+#     while not app.should_stop_realtime:
 #         try:
 #             await asyncio.sleep(5)  # Update every 5 seconds
             
@@ -441,15 +415,20 @@ async def process_soldiers(soldier_data_stream):
 #             )
 
 #             if not latest_session:
-#                 logger.debug("No active session found for periodic update")
+#                 logger.error("No active session found for periodic update")
 #                 continue
 
 #             # For each soldier, push a new stats entry with current values
 #             for soldier_index, soldier in enumerate(latest_session["participated_soldiers"]):
 #                 try:
 #                     # Get current stats and last stat entry
+#                     # This uses a conditional expression: A if condition else B.
 #                     current_stats = soldier.get("stats", [])
 #                     last_stat = current_stats[-1] if current_stats else {"kill_count": 0, "bullets_fired": 0}
+                    
+#                     # Get team for bullet count (not used here, but could be extended)
+#                     team = soldier.get("team", "").lower()
+#                     team_key = f"team_{team}" if team in ["red", "blue"] else None
                     
 #                     # Create new stat entry with current values and timestamp
 #                     new_stat = {
@@ -477,11 +456,13 @@ async def process_soldiers(soldier_data_stream):
 #             # After updating all stats, calculate and broadcast team stats
 #             await calculate_and_broadcast_team_stats(latest_session["_id"])
 
-#             logger.debug("Periodic stats update completed successfully")
+#             # Log successful update
+#             logger.info("Periodic stats update completed successfully")
 
 #         except Exception as e:
 #             logger.error(f"Error in periodic stats update: {e}", exc_info=True)
 #             await asyncio.sleep(1)  # Short sleep on error before retrying
+
 
 
 # Entry point for running the Faust app
