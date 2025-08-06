@@ -100,12 +100,12 @@ export default function Synchronization() {
   return (
     <div className={styles.container}>
       <div className={styles.title}>
-        <button className={styles.button} onClick={() => router.push('/zmap overlay')}>
+        <button className={styles.button} onClick={() => router.push('/zmap-overlay')}>
           MAP OVERLAY
         </button>
         <h2>DATA SYNCHRONIZATION</h2>
         {showRealTimeButton && (
-          <button className={styles.button} onClick={() => router.push('/rtm')}>
+          <button className={styles.button} onClick={() => router.push('/monitoring')}>
             REAL TIME MONITORING
           </button>
         )}

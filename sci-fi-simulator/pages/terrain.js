@@ -9,19 +9,19 @@ export default function terrain() {
         <ul>
          
           <li>
-            <Link href="/resource-allocation">Resource Allocation</Link>
+                    <a href="/resource-allocation">Resource Allocation</a>
           </li>
           <li>
-            <Link href="/zmapoverlay">Map Overlay</Link>
+            <a href="/zmapoverlay">Map Overlay</a>
           </li>
           <li>
-            <Link href="/rtm">Real-Time Monitoring</Link>
+            <a href="/simulation">Real-Time Monitoring</a>
           </li>
           <li>
-            <Link href="/aar">View Previous Exercise</Link>
+            < a href="/aar">View Previous Exercise</a>
           </li>
           <li>
-            <Link href="/settings">Settings</Link>
+            <a href="/settings">Settings</a>
           </li>
         </ul>
       </div>

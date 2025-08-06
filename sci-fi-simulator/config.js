@@ -1,6 +1,6 @@
 const WS_CONFIG = {
-  BASE_URL: 'ws://192.168.1.17',
-  HTTP_BASE_URL: 'http://192.168.1.17', // Added HTTP base URL for API calls
+  BASE_URL: 'ws://192.168.1.21',
+  HTTP_BASE_URL: 'http://192.168.1.21', // Added HTTP base URL for API calls
   // Real-Time Monitoring Ports (RTM)
   RTM_PORTS: {
     SOLDIER_DATA: 8001,
@@ -53,34 +53,24 @@ WS_CONFIG.getAllHttpApiUrls = () => [
   WS_CONFIG.getReplayInitUrl(),
 ];
 
-export { WS_CONFIG };
+// Export using CommonJS
+module.exports = { WS_CONFIG };
 
 // Debug: Log the URLs being used
-
 console.log('Real-Time Monitoring WebSocket URLs:', {
-
-soldier: WS_CONFIG.getSoldierWsUrl(),
-
-killFeed: WS_CONFIG.getKillFeedWsUrl(),
-
-stats: WS_CONFIG.getStatsWsUrl(),
-
+  soldier: WS_CONFIG.getSoldierWsUrl(),
+  killFeed: WS_CONFIG.getKillFeedWsUrl(),
+  stats: WS_CONFIG.getStatsWsUrl(),
 });
 
 console.log('After Action Review WebSocket URLs:', {
-
-soldier: WS_CONFIG.getAARSoldierWsUrl(),
-
-killFeed: WS_CONFIG.getAARKillFeedWsUrl(),
-
-stats: WS_CONFIG.getAARStatsWsUrl(),
-
+  soldier: WS_CONFIG.getAARSoldierWsUrl(),
+  killFeed: WS_CONFIG.getAARKillFeedWsUrl(),
+  stats: WS_CONFIG.getAARStatsWsUrl(),
 });
 
 console.log('HTTP API URLs:', {
-
-replayInit: WS_CONFIG.getReplayInitUrl(),
-
+  replayInit: WS_CONFIG.getReplayInitUrl(),
 });
 
 console.log('All WebSocket URLs for CSP:', WS_CONFIG.getAllWebSocketUrls());

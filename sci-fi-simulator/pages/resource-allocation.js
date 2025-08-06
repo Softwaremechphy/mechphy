@@ -541,4 +541,4 @@ export default function ResourceAllocation() {
       )}
     </div>
   );
-}
+}                                                                                                                                                                                                   

@@ -1,25 +1,19 @@
 // pages/_document.js
-import Document, { Html, Head, Main, NextScript } from 'next/document';
+import { Html, Head, Main, NextScript } from "next/document";
 
-class MyDocument extends Document {
-  render() {
-    return (
-      <Html>
-        <Head>
-          {/* Leaflet CSS */}
-          <link rel="stylesheet" href="/leaflet/leaflet.css" />
-          {/* Leaflet JS - Synchronous loading */}
-          <script src="/leaflet/leaflet.js"></script>
-          {/* SQL.js - Synchronous loading */}
-          <script src="/sqljs/sql-wasm.js"></script>
-        </Head>
-        <body>
-          <Main />
-          <NextScript />
-        </body>
-      </Html>
-    );
-  }
+export default function Document() {
+  return (
+    <Html lang="en">
+      <Head>
+       <linl rel='stylesheet' href='/leaflet/leaflet.css' />
+       <script src="/leaflet/leaflet.js" defer></script>
+       <script src ="/sqljs/sql-wasm.js" defer></script>
+      </Head>
+
+      <body>
+        <Main />
+        <NextScript />
+      </body>
+    </Html>
+  );
 }
-
-export default MyDocument;
