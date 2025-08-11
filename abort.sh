@@ -1,3 +1,4 @@
+now i need to improve abort code in that everything else wokring fine but need to close local host 3000 that one 
 #!/bin/bash
 
 echo "Shutting down all services..."
@@ -16,6 +17,7 @@ sleep 3 # Give Zookeeper a moment as well
 # Using 'pkill' finds and stops the process based on its command name
 echo "Stopping Python application..."
 pkill -f "main.py replay"
+
 
 # 4. Stop MongoDB
 echo "Stopping MongoDB..."

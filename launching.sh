@@ -70,9 +70,16 @@ if [ \"\$(printf '%s\n' \"\$REQUIRED_VERSION\" \"\$NODE_VERSION\" | sort -V | he
         npm install
     fi
     
-    # Start the development server
+    # Start the development server and open Chrome
     echo 'Starting Next.js development server...'
-    npm run dev
+    npm run dev &
+    
+    # Wait for the server to start (adjust sleep time if needed)
+    sleep 5
+    
+    # Open Google Chrome to the Next.js app
+    echo 'Opening Google Chrome...'
+    google-chrome http://localhost:3000 2>/dev/null || xdg-open http://localhost:3000 2>/dev/null || echo 'Failed to open browser. Please open http://localhost:3000 manually.'
 else
     echo '✗ Node.js version is incompatible. Please upgrade to Node.js 18.17+'
     echo 'Current version:' \$NODE_VERSION

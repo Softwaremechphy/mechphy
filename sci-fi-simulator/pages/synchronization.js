@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useGlobalContext } from "../context/GlobalContext";
 import { useRouter } from "next/router";
 import styles from "../styles/synchronization.module.css";
@@ -9,9 +9,10 @@ export default function Synchronization() {
   const [webSocketError, setWebSocketError] = useState(null);
   const [activeForceTeam, setActiveForceTeam] = useState(null);
   const [showRealTimeButton, setShowRealTimeButton] = useState(false);
-  const isBackendAvailable = false;
+  const wsRef = useRef(null); // To store WebSocket instance
+  const allSoldierIdsRef = useRef(new Set()); // Store all soldier IDs from your base
 
-  // Initialize all soldiers as unidentified
+  // Initialize soldiers and handle API/WebSocket logic
   useEffect(() => {
     if (resourceAllocation && Object.keys(resourceAllocation).length > 0) {
       // Set initial force and team
@@ -19,50 +20,115 @@ export default function Synchronization() {
       const firstTeam = Object.keys(resourceAllocation[firstForce])[0];
       setActiveForceTeam(`${firstForce}-${firstTeam}`);
 
-      // Initialize all soldiers with unidentified status (grey)
+      // Initialize all soldiers with inactive status (red)
       const initialStatuses = {};
+      const allSoldierIds = new Set(); // To store all unique soldier IDs from your base
+      
       Object.entries(resourceAllocation).forEach(([force, teams]) => {
         Object.entries(teams).forEach(([team, data]) => {
           if (data.soldiers && Array.isArray(data.soldiers)) {
             data.soldiers.forEach(soldier => {
-              initialStatuses[soldier.soldier_id] = 'unidentified';
+              // Store soldier_id as string for consistent comparison
+              const soldierIdStr = String(soldier.soldier_id);
+              allSoldierIds.add(soldierIdStr);
+              initialStatuses[soldierIdStr] = 'inactive';
             });
           }
         });
       });
+      
+      // Update the ref with all soldier IDs from your base
+      allSoldierIdsRef.current = allSoldierIds;
       setActiveStatus(initialStatuses);
 
-      // After 5 seconds, randomly set some soldiers to inactive (red)
-      const timer1 = setTimeout(() => {
-        setActiveStatus(prev => {
-          const newStatuses = { ...prev };
-          Object.keys(newStatuses).forEach(key => {
-            // Set approximately 50% of soldiers to inactive
-            if (Math.random() > 0.5) {
-              newStatuses[key] = 'inactive';
+      console.log('All soldier IDs in base:', Array.from(allSoldierIds));
+
+      // Hit API immediately on page load
+      const startSession = async () => {
+        try {
+          const response = await fetch('/api/sessions/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+          });
+          if (!response.ok) throw new Error('Failed to start session');
+          console.log('Session started successfully at', new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }));
+        } catch (error) {
+          console.error('Error starting session:', error);
+          setWebSocketError(`Error starting session: ${error.message}`);
+        }
+      };
+      startSession();
+
+      // Connect to WebSocket after 3 seconds
+      const timer = setTimeout(() => {
+        const wsUrl = 'ws://192.168.1.17:8001/ws'; // Use allowed WebSocket URL
+        wsRef.current = new WebSocket(wsUrl);
+
+        wsRef.current.onopen = () => {
+          console.log('WebSocket connection established at', new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }));
+        };
+
+        wsRef.current.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            console.log('Received WebSocket data:', data);
+            
+            // Check if soldier_id exists in the message
+            if (data.soldier_id) {
+              // Convert soldier_id to string for consistent comparison
+              const incomingSoldierId = String(data.soldier_id).trim();
+              console.log('Checking soldier_id:', incomingSoldierId);
+              
+              // Check if this soldier_id exists in our base
+              if (allSoldierIdsRef.current.has(incomingSoldierId)) {
+                console.log(`Soldier ${incomingSoldierId} found in base - turning active (green)`);
+                setActiveStatus(prev => ({
+                  ...prev,
+                  [incomingSoldierId]: 'active',
+                }));
+              } else {
+                console.log(`Soldier ${incomingSoldierId} not found in base - ignoring`);
+              }
+            } else {
+              console.log('No soldier_id found in WebSocket message');
             }
-          });
-          return newStatuses;
-        });
+          } catch (error) {
+            console.error('Error parsing WebSocket message:', error);
+            setWebSocketError('Error parsing WebSocket message');
+          }
+        };
 
-        // After 10 more seconds, set all to active (green) and show real-time button
-        const timer2 = setTimeout(() => {
-          setActiveStatus(prev => {
-            const allActive = {};
-            Object.keys(prev).forEach(key => {
-              allActive[key] = 'active';
-            });
-            return allActive;
-          });
-          setShowRealTimeButton(true);
-        }, 10000);
+        wsRef.current.onerror = (error) => {
+          console.error('WebSocket error:', error);
+          setWebSocketError('WebSocket connection failed');
+        };
 
-        return () => clearTimeout(timer2);
-      }, 5000);
+        wsRef.current.onclose = () => {
+          console.log('WebSocket connection closed at', new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }));
+        };
+      }, 3000); // 3-second delay
 
-      return () => clearTimeout(timer1);
+      // Cleanup on unmount
+      return () => {
+        clearTimeout(timer);
+        if (wsRef.current) {
+          wsRef.current.close();
+        }
+      };
     }
   }, [resourceAllocation, setActiveStatus]);
+
+  // Show "Real Time Monitoring" button when all soldiers are active
+  useEffect(() => {
+    if (activeStatus && Object.keys(activeStatus).length > 0) {
+      const allActive = Object.values(activeStatus).every(status => status === 'active');
+      setShowRealTimeButton(allActive);
+      
+      if (allActive) {
+        console.log('All soldiers are now active - showing Real Time Monitoring button');
+      }
+    }
+  }, [activeStatus]);
 
   const getStatusColor = (status) => {
     switch (status) {
@@ -75,11 +141,10 @@ export default function Synchronization() {
     }
   };
 
-  // Calculate total height based on number of soldiers
+  // Calculate panel height based on number of soldiers
   const calculatePanelHeight = () => {
     if (currentForce && currentTeam && resourceAllocation[currentForce][currentTeam].soldiers) {
       const numSoldiers = resourceAllocation[currentForce][currentTeam].soldiers.length;
-      // Assume each soldier row is 100px tall including margin
       return Math.max(400, numSoldiers * 100); // Minimum height of 400px
     }
     return 400; // Default height
@@ -105,7 +170,7 @@ export default function Synchronization() {
         </button>
         <h2>DATA SYNCHRONIZATION</h2>
         {showRealTimeButton && (
-          <button className={styles.button} onClick={() => router.push('/monitoring')}>
+          <button className={styles.button} onClick={() => router.push('/rtm')}>
             REAL TIME MONITORING
           </button>
         )}
@@ -169,7 +234,7 @@ export default function Synchronization() {
                 <div className={styles.statusIndicator}>
                   <span className={styles.statusLabel}>Status:</span>
                   <div 
-                    className={`${styles.statusToggle} ${getStatusColor(activeStatus[soldier.soldier_id])}`}
+                    className={`${styles.statusToggle} ${getStatusColor(activeStatus[String(soldier.soldier_id)])}`}
                   />
                 </div>
               </div>

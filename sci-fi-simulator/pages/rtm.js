@@ -1,5 +1,6 @@
 import dynamic from "next/dynamic";
 import { useEffect, useState } from "react";
+import { useRouter } from "next/router";
 import styles from "../styles/rtm.module.css";
 import Sidebar from "../components/Sidebar";
 import KillFeed from "../components/KillFeed";
@@ -13,25 +14,46 @@ const MapSection = dynamic(() => import("../components/MapSection"), {
 
 export default function RealTimeMonitoring() {
   const [soldiers, setSoldiers] = useState([]);
-  // Track which soldier is "selected" (clicked in the sidebar)
+  const [sessionId, setSessionId] = useState(null);
   const [selectedSoldierId, setSelectedSoldierId] = useState(null);
+  const router = useRouter();
 
   useEffect(() => {
-    // Connect to WebSocket for soldier data
+    // Fetch all sessions to get the latest session ID
+    const fetchSessions = async () => {
+      try {
+        const response = await fetch("/api/sessions/all_sessions", {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        });
+        if (response.ok) {
+          const sessions = await response.json();
+          // Assuming sessions is an array and sorted by creation date or ID
+          const latestSession = sessions.reduce((latest, current) => 
+            new Date(latest.created_at) > new Date(current.created_at) ? latest : current
+          );
+          setSessionId(latestSession.session_id);
+        } else {
+          console.error("Failed to fetch sessions");
+        }
+      } catch (error) {
+        console.error("Error fetching sessions:", error);
+      }
+    };
+
+    fetchSessions();
+
+    // Connect to WebSocket for soldier data (for map and other components)
     const ws = new WebSocket(WS_CONFIG.getSoldierWsUrl());
 
-    // Handle incoming messages
     ws.onmessage = (message) => {
       try {
         const data = JSON.parse(message.data);
 
-        // Update the soldiers array
         setSoldiers((prev) => {
-          // Remove any old soldier record with the same ID
           const filtered = prev.filter((s) => s.soldier_id !== data.soldier_id);
-
-          // Add or merge the new data
-          // Optionally add a lastUpdate for "time ago"
           return [
             ...filtered,
             { ...data, lastUpdate: new Date().toISOString() },
@@ -42,7 +64,6 @@ export default function RealTimeMonitoring() {
       }
     };
 
-    // Cleanup on unmount
     return () => {
       ws.close();
     };
@@ -52,23 +73,52 @@ export default function RealTimeMonitoring() {
     setSelectedSoldierId((prevId) => (prevId === soldierId ? null : soldierId));
   };
 
+  const handleEndSession = async () => {
+    if (!sessionId) {
+      console.error("No session ID available");
+      return;
+    }
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}/end`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+      if (response.ok) {
+        console.log("Session ended successfully");
+        // Navigate to index page after successful session end
+        router.push('/adddetails');
+      } else {
+        console.error("Failed to end session, status:", response.status);
+        // You might still want to navigate even if the API call fails
+        // router.push('/');
+      }
+    } catch (error) {
+      console.error("Error ending session:", error);
+      // You might still want to navigate even if there's an error
+      // router.push('/');
+    }
+  };
+
   return (
     <div className={styles.simulationPage}>
-      <a href="/" className={styles.endSessionButton}>
+      <button 
+        className={styles.endSessionButton} 
+        onClick={handleEndSession}
+      >
         End Session
-      </a>
+      </button>
 
       <div className={styles.container}>
-        {/* SIDEBAR (Left) */}
         <div className={styles.leftContainer}>
+          {/* Sidebar now handles its own data fetching */}
           <Sidebar
-            soldiers={soldiers}
             selectedSoldierId={selectedSoldierId}
             onSelectSoldier={handleSelectSoldier}
           />
         </div>
 
-        {/* MAP + Bottom Section (Right) */}
         <div className={styles.rightContainer}>
           <div className={styles.mapContainer}>
             <MapSection

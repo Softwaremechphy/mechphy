@@ -1,6 +1,6 @@
 const WS_CONFIG = {
-  BASE_URL: 'ws://192.168.1.21',
-  HTTP_BASE_URL: 'http://192.168.1.21', // Added HTTP base URL for API calls
+  BASE_URL: 'ws://192.168.1.17',
+  HTTP_BASE_URL: 'http://192.168.1.17', // Added HTTP base URL for API calls
   // Real-Time Monitoring Ports (RTM)
   RTM_PORTS: {
     SOLDIER_DATA: 8001,

@@ -1,76 +1,165 @@
-import React, { useState, useMemo, useRef, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 
-/**
- * @param {Array} soldiers 
- * @param {string|null} selectedSoldierId 
- * @param {Function} onSelectSoldier 
- */
-export default function Sidebar({
-  soldiers,
-  selectedSoldierId,
-  onSelectSoldier,
-}) {
-  
+export default function Sidebar({ selectedSoldierId, onSelectSoldier }) {
+  const [soldiers, setSoldiers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [expandedTeams, setExpandedTeams] = useState({
-    team_red: true,  // Default expanded
-    team_blue: true  // Default expanded
+    team_red: true,
+    team_blue: true
   });
 
-  // Use stable sorting to prevent flickering
-  const groupedAndSorted = useMemo(() => {
-    const groupMap = {};
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        setLoading(true);
+        setError(null);
+
+        // Get all sessions
+        const sessionsResponse = await fetch('/api/sessions/all_sessions');
+        if (!sessionsResponse.ok) {
+          throw new Error(`Failed to fetch sessions: ${sessionsResponse.status}`);
+        }
+        
+        const sessionsData = await sessionsResponse.json();
+        
+        if (!sessionsData || sessionsData.length === 0) {
+          throw new Error('No sessions found');
+        }
+
+        // Get the latest session
+        const latestSession = sessionsData[sessionsData.length - 1];
+        
+        // Get team squad soldiers
+        const teamResponse = await fetch(`/api/sessions/${latestSession.session_id}/team_squad_soldiers`);
+        if (!teamResponse.ok) {
+          throw new Error(`Failed to fetch team data: ${teamResponse.status}`);
+        }
+        
+        const teamData = await teamResponse.json();
+        
+        // Transform the data structure
+        const soldiersArray = [];
+        
+        // Process each team
+        Object.keys(teamData).forEach(teamName => {
+          const teamSquads = teamData[teamName];
+          
+          if (teamSquads && typeof teamSquads === 'object') {
+            // Process each squad in the team
+            Object.keys(teamSquads).forEach(squadName => {
+              const squadSoldiers = teamSquads[squadName];
+              
+              if (Array.isArray(squadSoldiers)) {
+                squadSoldiers.forEach(soldier => {
+                  soldiersArray.push({
+                    soldier_id: soldier.soldier_id,
+                    call_sign: soldier.call_sign,
+                    team: teamName,
+                    squad: squadName,
+                    hit_status: false, // Default to alive
+                    session_soldier_id: soldier.session_soldier_id
+                  });
+                });
+              }
+            });
+          }
+        });
+        
+        setSoldiers(soldiersArray);
+
+      } catch (err) {
+        setError(err.message);
+        console.error('Sidebar fetch error:', err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchData();
+
+    // Refresh every 5 seconds
+    const interval = setInterval(fetchData, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Group soldiers by team
+  const groupedSoldiers = useMemo(() => {
+    const groups = {};
     
-    // Group soldiers by team
-    soldiers.forEach((s) => {
-      const teamName = s.team || "team_red"; // fallback if missing
-      if (!groupMap[teamName]) groupMap[teamName] = [];
-      groupMap[teamName].push(s);
+    soldiers.forEach(soldier => {
+      const teamName = soldier.team || 'team_red';
+      if (!groups[teamName]) {
+        groups[teamName] = [];
+      }
+      groups[teamName].push(soldier);
     });
 
-    // Sort each team's soldiers ONCE and keep stable order
-    Object.keys(groupMap).forEach(teamName => {
-      groupMap[teamName].sort((a, b) => {
+    // Sort soldiers within each team
+    Object.keys(groups).forEach(teamName => {
+      groups[teamName].sort((a, b) => {
         const idA = parseInt(a.soldier_id) || 0;
         const idB = parseInt(b.soldier_id) || 0;
         return idA - idB;
       });
     });
 
-    return groupMap;
-  }, [soldiers.length]); // Only re-sort when soldier count changes, not on every update
+    return groups;
+  }, [soldiers]);
 
-  // Update soldier data without re-sorting
-  const updatedGrouped = useMemo(() => {
-    const updated = {};
-    
-    Object.keys(groupedAndSorted).forEach(teamName => {
-      updated[teamName] = groupedAndSorted[teamName].map(soldier => {
-        // Find the latest data for this soldier
-        const latestData = soldiers.find(s => s.soldier_id === soldier.soldier_id);
-        return latestData || soldier;
-      });
-    });
-    
-    return updated;
-  }, [soldiers, groupedAndSorted]);
-
-  // Toggle expand/collapse for a team
   const toggleTeam = (teamName) => {
-    setExpandedTeams((prev) => ({
+    setExpandedTeams(prev => ({
       ...prev,
-      [teamName]: !prev[teamName],
+      [teamName]: !prev[teamName]
     }));
   };
 
+  if (loading) {
+    return (
+      <aside style={styles.container}>
+        <h2 style={styles.header}>TEAM</h2>
+        <div style={styles.messageContainer}>
+          <div style={styles.loadingText}>Loading...</div>
+        </div>
+      </aside>
+    );
+  }
+
+  if (error) {
+    return (
+      <aside style={styles.container}>
+        <h2 style={styles.header}>TEAM</h2>
+        <div style={styles.messageContainer}>
+          <div style={styles.errorText}>Error: {error}</div>
+          <button 
+            onClick={() => window.location.reload()} 
+            style={styles.retryButton}
+          >
+            Retry
+          </button>
+        </div>
+      </aside>
+    );
+  }
+
+  if (soldiers.length === 0) {
+    return (
+      <aside style={styles.container}>
+        <h2 style={styles.header}>TEAM</h2>
+        <div style={styles.messageContainer}>
+          <div style={styles.emptyText}>No soldiers found</div>
+        </div>
+      </aside>
+    );
+  }
+
   return (
     <aside style={styles.container}>
-      <h2 style={styles.header}>TEAM </h2>
+      <h2 style={styles.header}>TEAM</h2>
 
-      {Object.keys(updatedGrouped).map((teamName) => {
-        const isExpanded = expandedTeams[teamName] !== false; // Default to expanded
-        const teamSoldiers = updatedGrouped[teamName];
-        
-        // Team color styling
+      {Object.keys(groupedSoldiers).map(teamName => {
+        const isExpanded = expandedTeams[teamName] !== false;
+        const teamSoldiers = groupedSoldiers[teamName];
         const teamColor = teamName === 'team_red' ? '#ff4444' : '#4488ff';
 
         return (
@@ -90,10 +179,9 @@ export default function Sidebar({
               </span>
             </div>
             
-            {/* If expanded, show all soldiers under this team */}
             {isExpanded && (
               <div style={styles.soldierList}>
-                {teamSoldiers.map((soldier) => (
+                {teamSoldiers.map(soldier => (
                   <SoldierRow
                     key={soldier.soldier_id}
                     soldier={soldier}
@@ -111,15 +199,10 @@ export default function Sidebar({
   );
 }
 
-// Memoized soldier row to prevent unnecessary re-renders
 const SoldierRow = React.memo(({ soldier, teamColor, isSelected, onSelectSoldier }) => {
   const { soldier_id, hit_status, call_sign } = soldier;
   const statusColor = hit_status ? "#ff3333" : "#33ff33";
-  const statusText = hit_status ? "KIll" : "ACTIVE";
-
-  const handleClick = () => {
-    onSelectSoldier(soldier_id);
-  };
+  const statusText = hit_status ? "KILL" : "ACTIVE";
 
   return (
     <div
@@ -129,7 +212,7 @@ const SoldierRow = React.memo(({ soldier, teamColor, isSelected, onSelectSoldier
         borderColor: isSelected ? teamColor : "transparent",
         borderLeft: `3px solid ${teamColor}`,
       }}
-      onClick={handleClick}
+      onClick={() => onSelectSoldier(soldier_id)}
     >
       <div style={styles.soldierLeft}>
         <span style={{ color: statusColor, marginRight: "0.5rem", fontSize: '1.2rem' }}>●</span>
@@ -238,6 +321,35 @@ const styles = {
   soldierRight: {
     fontSize: "0.9rem",
   },
+  messageContainer: {
+    display: "flex",
+    flexDirection: "column",
+    justifyContent: "center",
+    alignItems: "center",
+    height: "200px",
+    gap: "1rem",
+  },
+  loadingText: {
+    color: "#00ffff",
+    fontSize: "1.1rem",
+  },
+  errorText: {
+    color: "#ff4444",
+    fontSize: "1rem",
+    textAlign: "center",
+  },
+  emptyText: {
+    color: "#888",
+    fontSize: "1rem",
+    textAlign: "center",
+  },
+  retryButton: {
+    backgroundColor: "#ff4444",
+    color: "#fff",
+    border: "none",
+    padding: "0.5rem 1rem",
+    borderRadius: "4px",
+    cursor: "pointer",
+    fontSize: "0.9rem",
+  },
 };
-
-// Component is already exported as default at the top
