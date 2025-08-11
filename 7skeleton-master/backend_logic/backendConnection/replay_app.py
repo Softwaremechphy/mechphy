@@ -6,7 +6,7 @@ from mode import Service
 from configs.config import settings
 from fastapi import APIRouter, HTTPException
 from typing import List, Dict, Optional
-from configs.logging_config import faust_logger
+from configs.logging_config import replay_logger as logger 
 from backend_logic.pydantic_responses_in import replay_pydantic
 import websockets
 import asyncio
@@ -50,7 +50,7 @@ class WebSocketService(Service):
         self.connections = set()
         self.server = None
         super().__init__()
-        faust_logger.info(f"Initialized {name} WebSocket service on port {port}")
+        logger.info(f"Initialized {name} WebSocket service on port {port}")
 
     async def on_started(self) -> None:
         """Start WebSocket server when service starts"""
@@ -60,9 +60,9 @@ class WebSocketService(Service):
                 self.host,
                 self.port
             )
-            faust_logger.info(f"Started {self.name} WebSocket server on {self.host}:{self.port}")
+            logger.info(f"Started {self.name} WebSocket server on {self.host}:{self.port}")
         except Exception as e:
-            faust_logger.error(f"Failed to start {self.name} WebSocket server: {str(e)}")
+            logger.error(f"Failed to start {self.name} WebSocket server: {str(e)}")
             raise
 
     async def on_stop(self) -> None:
@@ -78,21 +78,21 @@ class WebSocketService(Service):
                 await asyncio.gather(*close_tasks, return_exceptions=True)
             
             self.connections.clear()
-            faust_logger.info(f"Stopped {self.name} WebSocket server")
+            logger.info(f"Stopped {self.name} WebSocket server")
         except Exception as e:
-            faust_logger.error(f"Error stopping {self.name} WebSocket server: {str(e)}")
+            logger.error(f"Error stopping {self.name} WebSocket server: {str(e)}")
 
     async def handle_connection(self, websocket, path):
         """Handle new WebSocket connections with explicit path handling"""
         try:
             # Check if the path is '/ws' or matches expected path
             if path != '/ws':
-                faust_logger.warning(f"Unexpected connection path: {path}")
+                logger.warning(f"Unexpected connection path: {path}")
                 await websocket.close(code=1003, reason="Invalid path")
                 return
 
             self.connections.add(websocket)
-            faust_logger.info(f"New connection to {self.name} WebSocket from {websocket.remote_address}")
+            logger.info(f"New connection to {self.name} WebSocket from {websocket.remote_address}")
             
             try:
                 # Send initial connection confirmation
@@ -104,16 +104,16 @@ class WebSocketService(Service):
                 
                 # Keep the connection open and handle incoming messages if needed
                 async for message in websocket:
-                    faust_logger.debug(f"Received message on {self.name} WebSocket: {message}")
+                    logger.debug(f"Received message on {self.name} WebSocket: {message}")
                     # Optional: Add message handling logic here
             
             except websockets.exceptions.ConnectionClosed:
-                faust_logger.info(f"Connection closed for {self.name} WebSocket")
+                logger.info(f"Connection closed for {self.name} WebSocket")
             finally:
                 self.connections.remove(websocket)
     
         except Exception as e:
-            faust_logger.error(f"Error in {self.name} WebSocket connection handler: {str(e)}")
+            logger.error(f"Error in {self.name} WebSocket connection handler: {str(e)}")
 
     async def broadcast(self, message: dict):
         """
@@ -123,7 +123,7 @@ class WebSocketService(Service):
             message (dict): Message to broadcast
         """
         if not self.connections:
-            faust_logger.debug(f"No active connections for {self.name} WebSocket")
+            logger.debug(f"No active connections for {self.name} WebSocket")
             return
             
         disconnected = set()
@@ -140,7 +140,7 @@ class WebSocketService(Service):
                 except websockets.exceptions.ConnectionClosed:
                     disconnected.add(websocket)
                 except Exception as e:
-                    faust_logger.error(f"Error preparing broadcast to {self.name} WebSocket: {str(e)}")
+                    logger.error(f"Error preparing broadcast to {self.name} WebSocket: {str(e)}")
                     disconnected.add(websocket)
             
             # Wait for all broadcast tasks to complete
@@ -150,10 +150,10 @@ class WebSocketService(Service):
             # Remove disconnected clients
             self.connections.difference_update(disconnected)
             
-            faust_logger.debug(f"Broadcasted message to {len(self.connections)} {self.name} WebSocket connections")
+            logger.debug(f"Broadcasted message to {len(self.connections)} {self.name} WebSocket connections")
         
         except Exception as e:
-            faust_logger.error(f"Unexpected error in {self.name} WebSocket broadcast: {str(e)}")
+            logger.error(f"Unexpected error in {self.name} WebSocket broadcast: {str(e)}")
 
 class ReplayController:
     def __init__(self, session_id: str, app):
@@ -219,14 +219,14 @@ class ReplayController:
             self.is_running = True
             self.is_paused = False
             
-            faust_logger.info(
+            logger.info(
                 f"Initialized replay for session {self.session_id} "
                 f"with window size {self.window_size}"
             )
             return True
 
         except Exception as e:
-            faust_logger.error(f"Initialization failed: {str(e)}")
+            logger.error(f"Initialization failed: {str(e)}")
             raise
 
     async def _load_window(self, start_time: datetime):
@@ -250,7 +250,7 @@ class ReplayController:
         # Sort events by timestamp
         self.buffer['events'].sort(key=lambda x: parse_timestamp(x['timestamp']))
         
-        faust_logger.info(
+        logger.info(
             f"Loaded window from {start_time} to {end_time} "
             f"with {len(self.buffer['events'])} events"
         )
@@ -310,7 +310,7 @@ class ReplayController:
                 if self.current_index >= len(self.buffer['events']):
                     # Check if we need to load next window
                     if self.buffer['end_ts'] >= self.end_timestamp:
-                        faust_logger.info(f"Replay completed for session {self.session_id}")
+                        logger.info(f"Replay completed for session {self.session_id}")
                         await self.stop()
                         break
                     else:
@@ -353,10 +353,10 @@ class ReplayController:
                     await asyncio.sleep(delay)
 
         except asyncio.CancelledError:
-            faust_logger.info(f"Replay loop cancelled for session {self.session_id}")
+            logger.info(f"Replay loop cancelled for session {self.session_id}")
             await self.stop()
         except Exception as e:
-            faust_logger.error(f"Replay loop error: {str(e)}")
+            logger.error(f"Replay loop error: {str(e)}")
             await self.stop()
 
     async def _broadcast_state_at_timestamp(self, target_timestamp: datetime):
@@ -385,7 +385,7 @@ class ReplayController:
             if soldier_id in latest_stats:
                 await self._broadcast_stats(latest_stats[soldier_id], target_timestamp)
         
-        faust_logger.debug(f"Broadcasted state at timestamp {target_timestamp}")
+        logger.debug(f"Broadcasted state at timestamp {target_timestamp}")
 
     async def skip_n_seconds(self, n_seconds: int):
         """Skip forward n seconds and broadcast state at new position."""
@@ -411,7 +411,7 @@ class ReplayController:
         # Immediately broadcast state at new position
         await self._broadcast_state_at_timestamp(new_timestamp)
         
-        faust_logger.info(
+        logger.info(
             f"Skipped to {self.current_timestamp}, "
             f"new index: {self.current_index}/{len(self.buffer['events'])}"
         )
@@ -440,7 +440,7 @@ class ReplayController:
         # Immediately broadcast state at new position
         await self._broadcast_state_at_timestamp(new_timestamp)
         
-        faust_logger.info(
+        logger.info(
             f"Went back to {self.current_timestamp}, "
             f"new index: {self.current_index}/{len(self.buffer['events'])}"
         )
@@ -602,7 +602,7 @@ class ReplayController:
             }
 
         except Exception as e:
-            faust_logger.error(f"Error in _get_events: {str(e)}", exc_info=True)
+            logger.error(f"Error in _get_events: {str(e)}", exc_info=True)
             return [], {"kill_feed": [], "stats": []}
 
     async def _broadcast_movement(self, event, event_timestamp):
@@ -617,7 +617,7 @@ class ReplayController:
             "db_timestamp": event["timestamp"]
         }
 
-        faust_logger.debug(
+        logger.debug(
             f"[REPLAY] Broadcasting soldier_movement for soldier {event['soldier_id']} "
             f"(DB timestamp: {event['timestamp']}, replay-time parsed: {event_timestamp.isoformat()})"
         )
@@ -637,7 +637,7 @@ class ReplayController:
             "db_timestamp": event["timestamp"]
         }
 
-        faust_logger.debug(
+        logger.debug(
             f"[REPLAY] Broadcasting kill_feed event (DB timestamp: {event['timestamp']}, "
             f"replay-time parsed: {event_timestamp.isoformat()})"
         )
@@ -658,7 +658,7 @@ class ReplayController:
             "db_timestamp": event["timestamp"]
         }
 
-        faust_logger.debug(
+        logger.debug(
             f"[REPLAY] Broadcasting soldier_stats for soldier {event['soldier_id']} "
             f"(DB timestamp: {event['timestamp']}, replay-time parsed: {event_timestamp.isoformat()})"
         )
@@ -671,7 +671,7 @@ class ReplayController:
         if self._replay_task is not None:
             return
         self._replay_task = asyncio.create_task(self._replay_loop())
-        faust_logger.info(f"Started replay task for session {self.session_id}")
+        logger.info(f"Started replay task for session {self.session_id}")
         
     async def stop(self):
         """Stop the replay task."""
@@ -683,7 +683,7 @@ class ReplayController:
             except asyncio.CancelledError:
                 pass
             self._replay_task = None
-        faust_logger.info(f"Stopped replay for session {self.session_id}")
+        logger.info(f"Stopped replay for session {self.session_id}")
 
 class ReplayApp(faust.App):
     def __init__(self, *args, **kwargs):
@@ -698,7 +698,7 @@ class ReplayApp(faust.App):
         self.api = APIRouter()
         self._setup_routes()
         
-        faust_logger.info("ReplayApp initialized")
+        logger.info("ReplayApp initialized")
 
     async def start_websocket_services(self):
         """Start all WebSocket services"""
@@ -707,9 +707,9 @@ class ReplayApp(faust.App):
             await self.ws_raw.start()
             await self.ws_killfeed.start()
             await self.ws_stats.start()
-            faust_logger.info("All WebSocket services started successfully")
+            logger.info("All WebSocket services started successfully")
         except Exception as e:
-            faust_logger.error(f"Failed to start WebSocket services: {str(e)}")
+            logger.error(f"Failed to start WebSocket services: {str(e)}")
             raise
 
     async def stop_websocket_services(self):
@@ -719,9 +719,9 @@ class ReplayApp(faust.App):
             await self.ws_raw.stop()
             await self.ws_killfeed.stop()
             await self.ws_stats.stop()
-            faust_logger.info("All WebSocket services stopped successfully")
+            logger.info("All WebSocket services stopped successfully")
         except Exception as e:
-            faust_logger.error(f"Failed to stop WebSocket services: {str(e)}")
+            logger.error(f"Failed to stop WebSocket services: {str(e)}")
             raise
 
     def _setup_routes(self):
@@ -745,7 +745,7 @@ class ReplayApp(faust.App):
             except ValueError as e:
                 raise HTTPException(status_code=404, detail=str(e))
             except Exception as e:
-                faust_logger.error(f"Error starting replay: {str(e)}")
+                logger.error(f"Error starting replay: {str(e)}")
                 raise HTTPException(status_code=500, detail=str(e))
 
         @self.api.post("/control/{session_id}")
@@ -808,7 +808,7 @@ class ReplayApp(faust.App):
                 return {"status": "success", "command": command}
 
             except Exception as e:
-                faust_logger.error(f"Error controlling replay: {str(e)}")
+                logger.error(f"Error controlling replay: {str(e)}")
                 raise HTTPException(status_code=500, detail=str(e))
 
 def create_replay_app() -> ReplayApp:
@@ -818,7 +818,7 @@ def create_replay_app() -> ReplayApp:
         broker=settings.KAFKA_BROKER,
         store='memory://',
     )
-    faust_logger.info("Created new replay application")
+    logger.info("Created new replay application")
     return app
 
 # Create the application instance

@@ -69,8 +69,11 @@ def setup_logger(name, log_file, level=logging.INFO, max_bytes=5*1024*1024, back
     return logger
 
 # Create loggers with rotation
-fastapi_logger = setup_logger('fastapi', 'logs/fastapi.log', level=logging.DEBUG)
-faust_logger = setup_logger('faust', 'logs/faust.log', level=logging.DEBUG)
+#fastapi_logger = setup_logger('fastapi', 'logs/fastapi.log', level=logging.DEBUG)
+#faust_logger = setup_logger('faust', 'logs/faust.log', level=logging.DEBUG)
+fastapi_logger = setup_logger("fastapi", "logs/fastapi.log", level=logging.DEBUG)
+faust_logger   = setup_logger("faust_app_v1", "logs/faust_app_v1.log", level=logging.DEBUG)
+replay_logger  = setup_logger("replay_app", "logs/replay_app.log", level=logging.DEBUG)
 
 # Optional: setup console logging only for fastapi
 console_handler = logging.StreamHandler()

@@ -4,7 +4,7 @@
 from fastapi import FastAPI, WebSocket  # FastAPI for web framework, WebSocket for real-time communication
 from fastapi.middleware.cors import CORSMiddleware  # Handle Cross-Origin Resource Sharing
 from configs.config import settings  # Import application configuration
-from configs.logging_config import fastapi_logger, faust_logger  # Import configured loggers
+from configs.logging_config import fastapi_logger # Import configured loggers
 import json  # For JSON serialization/deserialization
 import asyncio  # For asynchronous operations
 
